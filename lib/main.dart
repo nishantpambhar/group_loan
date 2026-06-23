@@ -36,7 +36,7 @@ String monthLabel(String key) {
 }
 String shiftMonth(String key, int delta) {
   final p = key.split('-');
-  return monthKeyOf(DateTime(int.parse(p[0]), int.parse(p[1]) - 1 + delta, 1));
+  return monthKeyOf(DateTime(int.parse(p[0]), int.parse(p[1]) + delta, 1));
 }
 String initialsOf(String name) {
   final parts = name.trim().split(RegExp(r'\s+'));
