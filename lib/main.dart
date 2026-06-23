@@ -80,18 +80,14 @@ Map<String, dynamic> computeLoan(Map loan, Map settings, [DateTime? asOf]) {
 /* ====================== seed ====================== */
 Map<String, dynamic> seedData() {
   final names = [
-    ['Ramesh Agravat', '99000 11111'], ['Suresh Mali', '99000 22222'],
-    ['Ketan Parmar', '99000 33333'], ['Bhavesh Hirpara', '99000 44444'],
-    ['Jayesh Kumbhar', '99000 55555'], ['Dharamshi H.', '99000 66666'],
-    ['Mahesh Gajjar', '99000 77777'], ['Nilesh Patel', '99000 88888'],
-    ['Hardik Solanki', '99000 99999'], ['Kiran Vaghela', '99000 10101'],
-    ['Pravin Joshi', '99000 12121'], ['Ashok Rathod', '99000 13131'],
+    ['Dhrupal Virani', ''], ['Soham Khunt', ''], ['Krinsh Sojitra', ''],
+    ['Raj Virani', ''], ['Raj Virani (2)', ''], ['Ruchit Vekariya', ''],
   ];
   final members = [for (final n in names) {'id': uid(), 'name': n[0], 'phone': n[1]}];
   final tm = monthKeyOf(DateTime.now());
   final contributions = {tm: <String, dynamic>{}};
   for (var i = 0; i < members.length; i++) {
-    contributions[tm]![members[i]['id'] as String] = i < 9 ? 'paid' : 'pending';
+    contributions[tm]![members[i]['id'] as String] = 'paid';
   }
   final start = DateTime.now();
   final s = monthKeyOf(DateTime(start.year, start.month - 3, 1));
@@ -107,7 +103,8 @@ Map<String, dynamic> seedData() {
   ];
   return {
     'settings': {'groupName': 'Snehal Bachat Group', 'monthly': 1000, 'penaltyAmount': 200, 'penaltyType': 'month'},
-    'members': members, 'contributions': contributions, 'loans': loans,
+    'members': members, 'contributions': contributions, 'penalties': <String, dynamic>{},
+    'yearlyAdjustments': <String, dynamic>{}, 'loans': loans,
   };
 }
 
@@ -121,15 +118,33 @@ class AppStore extends ChangeNotifier {
     final raw = p.getString(_key);
     if (raw == null) {
       data = seedData();
+      _normalize();
       await p.setString(_key, jsonEncode(data));
     } else {
       try {
         data = jsonDecode(raw) as Map<String, dynamic>;
+        _normalize();
+        await p.setString(_key, jsonEncode(data));
       } catch (_) {
         data = seedData();
+        _normalize();
         await p.setString(_key, jsonEncode(data));
       }
     }
+  }
+
+  void _normalize() {
+    data['settings'] ??= {'groupName': 'My Group', 'monthly': 1000, 'penaltyAmount': 0, 'penaltyType': 'month'};
+    final s = data['settings'] as Map;
+    s['groupName'] ??= 'My Group';
+    s['monthly'] ??= 1000;
+    s['penaltyAmount'] ??= 0;
+    s['penaltyType'] ??= 'month';
+    data['members'] ??= [];
+    data['contributions'] ??= {};
+    data['penalties'] ??= {};
+    data['yearlyAdjustments'] ??= {};
+    data['loans'] ??= [];
   }
 
   Future<void> _persist() async {
@@ -145,6 +160,7 @@ class AppStore extends ChangeNotifier {
 
   void replace(Map<String, dynamic> next) {
     data = next;
+    _normalize();
     _persist();
     notifyListeners();
   }
@@ -152,7 +168,67 @@ class AppStore extends ChangeNotifier {
   Map get settings => data['settings'] as Map;
   List get members => data['members'] as List;
   Map get contributions => data['contributions'] as Map;
+  Map get penalties => data['penalties'] as Map;
+  Map get yearlyAdjustments => data['yearlyAdjustments'] as Map;
   List get loans => data['loans'] as List;
+}
+
+
+bool isContributionPaid(dynamic v) => v == 'paid' || (v is Map && v['status'] == 'paid');
+
+num _toNum(dynamic v) {
+  if (v is num) return v;
+  if (v is String) return num.tryParse(v.trim()) ?? 0;
+  return 0;
+}
+
+String ym(int year, int month) => '$year-${_two(month)}';
+
+num monthlyPenalty(String month, String memberId) {
+  final root = store.data['penalties'];
+  if (root is! Map) return 0;
+  final mo = root[month];
+  if (mo is! Map) return 0;
+  return _toNum(mo[memberId]);
+}
+
+Map<String, dynamic> yearlyAdjustment(int year, String memberId) {
+  final root = store.data['yearlyAdjustments'];
+  if (root is! Map) return <String, dynamic>{};
+  final yr = root['$year'];
+  if (yr is! Map) return <String, dynamic>{};
+  final row = yr[memberId];
+  if (row is! Map) return <String, dynamic>{};
+  return Map<String, dynamic>.from(row);
+}
+
+num yearlyAdjustmentValue(int year, String memberId, String key) => _toNum(yearlyAdjustment(year, memberId)[key]);
+
+num yearPenaltyTotal(int year, String memberId) {
+  num total = 0;
+  for (var i = 1; i <= 12; i++) {
+    total += monthlyPenalty(ym(year, i), memberId);
+  }
+  return total;
+}
+
+num yearContributionTotal(int year, String memberId) {
+  final monthly = _toNum(store.settings['monthly']);
+  num total = 0;
+  for (var i = 1; i <= 12; i++) {
+    final mo = (store.contributions[ym(year, i)] as Map?) ?? {};
+    if (isContributionPaid(mo[memberId])) total += monthly;
+  }
+  return total;
+}
+
+String penaltyNotes(int year, String memberId) {
+  final notes = <String>[];
+  for (var i = 1; i <= 12; i++) {
+    final p = monthlyPenalty(ym(year, i), memberId);
+    if (p > 0) notes.add('${p.round()}(${_mon[i - 1].toUpperCase()})');
+  }
+  return notes.isEmpty ? 'Penalty:' : 'Penalty:${notes.join(', ')}';
 }
 
 late AppStore store;
@@ -485,12 +561,12 @@ class Dashboard extends StatelessWidget {
     final members = store.members;
     final tm = monthKeyOf(DateTime.now());
     final monthC = (store.contributions[tm] as Map?) ?? {};
-    final paidCount = members.where((m) => monthC[m['id']] == 'paid').length;
+    final paidCount = members.where((m) => isContributionPaid(monthC[m['id']])).length;
     final monthly = (s['monthly'] as num);
 
     double totalContrib = 0, disbursed = 0, repaid = 0, interestExp = 0, penalty = 0, outstanding = 0;
     store.contributions.forEach((k, mo) {
-      totalContrib += (mo as Map).values.where((v) => v == 'paid').length * monthly;
+      totalContrib += (mo as Map).values.where(isContributionPaid).length * monthly;
     });
     for (final l in store.loans) {
       final c = computeLoan(l, s);
@@ -719,7 +795,7 @@ class _MemberDetailState extends State<MemberDetail> {
     final s = store.settings;
     final monthsPaid = <String>[];
     store.contributions.forEach((k, mo) {
-      if ((mo as Map)[widget.memberId] == 'paid') monthsPaid.add(k as String);
+      if (isContributionPaid((mo as Map)[widget.memberId])) monthsPaid.add(k as String);
     });
     monthsPaid.sort((a, b) => b.compareTo(a));
     final myLoans = store.loans.where((l) => l['memberId'] == widget.memberId).toList();
@@ -775,6 +851,8 @@ class _MemberDetailState extends State<MemberDetail> {
           store.update((d) {
             (d['members'] as List).removeWhere((x) => x['id'] == widget.memberId);
             (d['contributions'] as Map).forEach((k, mo) => (mo as Map).remove(widget.memberId));
+            (d['penalties'] as Map).forEach((k, mo) => (mo as Map).remove(widget.memberId));
+            (d['yearlyAdjustments'] as Map).forEach((k, yr) => (yr as Map).remove(widget.memberId));
             (d['loans'] as List).removeWhere((l) => l['memberId'] == widget.memberId);
           });
           if (context.mounted) Navigator.pop(context);
@@ -808,8 +886,9 @@ class _CollectionPageState extends State<CollectionPage> {
     final monthly = s['monthly'] as num;
     final members = store.members;
     final monthC = (store.contributions[month] as Map?) ?? {};
-    final paid = members.where((m) => monthC[m['id']] == 'paid').length;
+    final paid = members.where((m) => isContributionPaid(monthC[m['id']])).length;
     final pendingAmt = (members.length - paid) * monthly;
+    final penaltyAmt = members.fold<num>(0, (sum, m) => sum + monthlyPenalty(month, m['id'] as String));
 
     return Column(children: [
       PageHead('Collection', '${inr(monthly)} per member'),
@@ -825,7 +904,8 @@ class _CollectionPageState extends State<CollectionPage> {
         child: Row(children: [
           _strip('Collected', inr(paid * monthly), paidC),
           _strip('Pending', inr(pendingAmt), pendingC),
-          _strip('Total', inr(members.length * monthly), ivory),
+          _strip('Penalty', inr(penaltyAmt), clay),
+          _strip('Total', inr(members.length * monthly + penaltyAmt), ivory),
         ]),
       ),
       Padding(
@@ -847,7 +927,8 @@ class _CollectionPageState extends State<CollectionPage> {
           separatorBuilder: (_, __) => const Divider(color: line, height: 1),
           itemBuilder: (_, i) {
             final m = members[i];
-            final isPaid = monthC[m['id']] == 'paid';
+            final isPaid = isContributionPaid(monthC[m['id']]);
+            final pen = monthlyPenalty(month, m['id'] as String);
             return Padding(
               padding: const EdgeInsets.symmetric(vertical: 11),
               child: Row(children: [
@@ -855,14 +936,18 @@ class _CollectionPageState extends State<CollectionPage> {
                 const SizedBox(width: 13),
                 Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Text(m['name'] as String, style: jk(15, w: FontWeight.w600)),
-                  Text(inr(monthly), style: jk(12.5, color: sage)),
+                  Text(pen > 0 ? '${inr(monthly)} · Penalty ${inr(pen)}' : inr(monthly), style: jk(12.5, color: pen > 0 ? clay : sage)),
                 ])),
+                IconButton(
+                  onPressed: () => openSheet(context, '${m['name']} · ${monthLabel(month)}', CollectionEntryForm(memberId: m['id'] as String, month: month, onSaved: () => setState(() {}))),
+                  icon: Icon(Icons.edit_note_outlined, color: pen > 0 ? clay : sage, size: 22),
+                ),
                 GestureDetector(
                   onTap: () {
                     store.update((d) {
                       final contribs = d['contributions'] as Map;
                       final mo = Map<String, dynamic>.from((contribs[month] as Map?) ?? {});
-                      mo[m['id']] = mo[m['id']] == 'paid' ? 'pending' : 'paid';
+                      mo[m['id']] = isContributionPaid(mo[m['id']]) ? 'pending' : 'paid';
                       contribs[month] = mo;
                     });
                     setState(() {});
@@ -894,6 +979,81 @@ class _CollectionPageState extends State<CollectionPage> {
           Text(label, style: jk(10.5, color: sage)),
         ]),
       );
+}
+
+
+class CollectionEntryForm extends StatefulWidget {
+  final String memberId;
+  final String month;
+  final VoidCallback? onSaved;
+  const CollectionEntryForm({required this.memberId, required this.month, this.onSaved, super.key});
+  @override
+  State<CollectionEntryForm> createState() => _CollectionEntryFormState();
+}
+
+class _CollectionEntryFormState extends State<CollectionEntryForm> {
+  late bool paid;
+  late TextEditingController penalty;
+
+  @override
+  void initState() {
+    super.initState();
+    final mo = (store.contributions[widget.month] as Map?) ?? {};
+    paid = isContributionPaid(mo[widget.memberId]);
+    final p = monthlyPenalty(widget.month, widget.memberId);
+    penalty = TextEditingController(text: p > 0 ? '${p.round()}' : '');
+  }
+
+  @override
+  void dispose() { penalty.dispose(); super.dispose(); }
+
+  @override
+  Widget build(BuildContext context) {
+    final monthly = _toNum(store.settings['monthly']);
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(color: forest2, border: Border.all(color: line), borderRadius: BorderRadius.circular(14)),
+        child: Row(children: [
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Monthly amount', style: jk(12, color: sage)),
+            const SizedBox(height: 4),
+            Text(inr(monthly), style: fr(22, color: gold2)),
+          ])),
+          Switch(
+            value: paid,
+            activeColor: paidC,
+            onChanged: (v) => setState(() => paid = v),
+          ),
+          Text(paid ? 'Paid' : 'Pending', style: jk(13, w: FontWeight.w600, color: paid ? paidC : pendingC)),
+        ]),
+      ),
+      const SizedBox(height: 12),
+      fieldLabel('Penalty for this month (₹)'),
+      TextField(controller: penalty, keyboardType: TextInputType.number, style: jk(16), decoration: fieldDeco('0')),
+      const SizedBox(height: 16),
+      primaryButton('Save entry', () {
+        store.update((d) {
+          final contribs = d['contributions'] as Map;
+          final mo = Map<String, dynamic>.from((contribs[widget.month] as Map?) ?? {});
+          mo[widget.memberId] = paid ? 'paid' : 'pending';
+          contribs[widget.month] = mo;
+
+          final penalties = d['penalties'] as Map;
+          final pmo = Map<String, dynamic>.from((penalties[widget.month] as Map?) ?? {});
+          final v = num.tryParse(penalty.text.trim()) ?? 0;
+          if (v > 0) {
+            pmo[widget.memberId] = v;
+          } else {
+            pmo.remove(widget.memberId);
+          }
+          penalties[widget.month] = pmo;
+        });
+        widget.onSaved?.call();
+        Navigator.pop(context);
+      }),
+    ]);
+  }
 }
 
 /* ====================== Loans ====================== */
@@ -1140,6 +1300,246 @@ class _LoanDetailState extends State<LoanDetail> {
       );
 }
 
+
+/* ====================== VC Year Report ====================== */
+class YearlyReportPage extends StatefulWidget {
+  const YearlyReportPage({super.key});
+  @override
+  State<YearlyReportPage> createState() => _YearlyReportPageState();
+}
+
+class _YearlyReportPageState extends State<YearlyReportPage> {
+  int year = DateTime.now().year;
+
+  @override
+  Widget build(BuildContext context) {
+    final members = store.members;
+    num grandContribution = 0;
+    num grandPenalty = 0;
+    num grandTotal = 0;
+    num grandInterestDue = 0;
+    num grandInterestPaid = 0;
+
+    for (final m in members) {
+      final id = m['id'] as String;
+      final contribution = yearContributionTotal(year, id);
+      final penalty = yearPenaltyTotal(year, id);
+      final vcDr = yearlyAdjustmentValue(year, id, 'vcDr');
+      final vcCr = yearlyAdjustmentValue(year, id, 'vcCr');
+      final interestDue = yearlyAdjustmentValue(year, id, 'interestDue');
+      final interestPaid = yearlyAdjustmentValue(year, id, 'interestPaid');
+      grandContribution += contribution;
+      grandPenalty += penalty;
+      grandInterestDue += interestDue;
+      grandInterestPaid += interestPaid;
+      grandTotal += contribution + penalty + vcCr - vcDr;
+    }
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+        IconButton(onPressed: () => setState(() => year--), icon: const Icon(Icons.chevron_left, color: gold2)),
+        Text('VC [$year]', style: fr(23, color: gold2)),
+        IconButton(onPressed: () => setState(() => year++), icon: const Icon(Icons.chevron_right, color: gold2)),
+      ]),
+      const SizedBox(height: 10),
+      Container(
+        padding: const EdgeInsets.all(14),
+        decoration: cardDeco(),
+        child: Column(children: [
+          Row(children: [
+            Expanded(child: _miniTotal('Contribution', inr(grandContribution), paidC)),
+            Expanded(child: _miniTotal('Penalty', inr(grandPenalty), clay)),
+            Expanded(child: _miniTotal('Total', inr(grandTotal), gold2)),
+          ]),
+          const SizedBox(height: 12),
+          Row(children: [
+            Expanded(child: _miniTotal('Interest due', inr(grandInterestDue), pendingC)),
+            Expanded(child: _miniTotal('Interest paid', inr(grandInterestPaid), paidC)),
+          ]),
+        ]),
+      ),
+      const SizedBox(height: 14),
+      Text('Member wise Excel-style report', style: jk(12, color: sage)),
+      const SizedBox(height: 10),
+      if (members.isEmpty) Text('No members available.', style: jk(13.5, color: sage)),
+      for (final m in members)
+        YearMemberCard(member: m as Map, year: year, onChanged: () => setState(() {})),
+    ]);
+  }
+
+  Widget _miniTotal(String label, String value, Color color) => Column(children: [
+        Text(value, textAlign: TextAlign.center, style: fr(16.5, color: color)),
+        const SizedBox(height: 4),
+        Text(label, textAlign: TextAlign.center, style: jk(10.5, color: sage)),
+      ]);
+}
+
+class YearMemberCard extends StatelessWidget {
+  final Map member;
+  final int year;
+  final VoidCallback onChanged;
+  const YearMemberCard({required this.member, required this.year, required this.onChanged, super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final id = member['id'] as String;
+    final monthly = _toNum(store.settings['monthly']);
+    final contribution = yearContributionTotal(year, id);
+    final penalty = yearPenaltyTotal(year, id);
+    final vcPercent = yearlyAdjustmentValue(year, id, 'vcPercent');
+    final vcDr = yearlyAdjustmentValue(year, id, 'vcDr');
+    final vcCr = yearlyAdjustmentValue(year, id, 'vcCr');
+    final interestDue = yearlyAdjustmentValue(year, id, 'interestDue');
+    final interestPaid = yearlyAdjustmentValue(year, id, 'interestPaid');
+    final percentile = yearlyAdjustmentValue(year, id, 'percentile');
+    final total = contribution + penalty + vcCr - vcDr;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: cardDeco(),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Avatar(member['name'] as String, size: 38),
+          const SizedBox(width: 12),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(member['name'] as String, style: jk(15, w: FontWeight.w700)),
+            Text(penaltyNotes(year, id), style: jk(11.5, color: penalty > 0 ? clay : sage)),
+          ])),
+          Text(inr(total), style: fr(18, color: gold2)),
+        ]),
+        const SizedBox(height: 12),
+        Wrap(spacing: 6, runSpacing: 6, children: [
+          for (var i = 1; i <= 12; i++)
+            _monthChip(_mon[i - 1].toUpperCase(), isContributionPaid(((store.contributions[ym(year, i)] as Map?) ?? {})[id]) ? inr(monthly) : '-'),
+        ]),
+        const SizedBox(height: 12),
+        GridView.count(
+          crossAxisCount: 3,
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          childAspectRatio: 2.05,
+          mainAxisSpacing: 1,
+          crossAxisSpacing: 1,
+          children: [
+            _smallCell('Penalty', inr(penalty), penalty > 0 ? clay : ivory),
+            _smallCell('VC(%)', vcPercent == 0 ? '-' : '${vcPercent.toStringAsFixed(vcPercent % 1 == 0 ? 0 : 2)}%', ivory),
+            _smallCell('VC(DR)', vcDr == 0 ? '-' : inr(vcDr), clay),
+            _smallCell('VC(CR)', vcCr == 0 ? '-' : inr(vcCr), paidC),
+            _smallCell('Interest due', inr(interestDue), pendingC),
+            _smallCell('Interest paid', interestPaid == 0 ? '-' : inr(interestPaid), paidC),
+            _smallCell('Percentile', percentile == 0 ? '-' : '${percentile.toStringAsFixed(percentile % 1 == 0 ? 0 : 2)}%', ivory),
+            _smallCell('Total', inr(total), gold2),
+          ],
+        ),
+        const SizedBox(height: 12),
+        ghostButton('Edit VC / Interest fields', () => openSheet(context, '${member['name']} · VC [$year]', YearlyFieldsForm(memberId: id, year: year, onSaved: onChanged))),
+      ]),
+    );
+  }
+
+  Widget _monthChip(String label, String value) => Container(
+        width: 64,
+        padding: const EdgeInsets.symmetric(vertical: 7),
+        decoration: BoxDecoration(color: forest2, border: Border.all(color: line), borderRadius: BorderRadius.circular(10)),
+        child: Column(children: [
+          Text(label, style: jk(9.5, color: sage)),
+          const SizedBox(height: 3),
+          Text(value, style: jk(11.5, w: FontWeight.w700, color: value == '-' ? sage : gold2)),
+        ]),
+      );
+
+  Widget _smallCell(String k, String v, Color c) => Container(
+        color: forest2,
+        padding: const EdgeInsets.all(8),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [
+          Text(k, maxLines: 1, overflow: TextOverflow.ellipsis, style: jk(9.5, color: sage)),
+          const SizedBox(height: 3),
+          Text(v, maxLines: 1, overflow: TextOverflow.ellipsis, style: jk(11.5, w: FontWeight.w700, color: c)),
+        ]),
+      );
+}
+
+class YearlyFieldsForm extends StatefulWidget {
+  final String memberId;
+  final int year;
+  final VoidCallback? onSaved;
+  const YearlyFieldsForm({required this.memberId, required this.year, this.onSaved, super.key});
+  @override
+  State<YearlyFieldsForm> createState() => _YearlyFieldsFormState();
+}
+
+class _YearlyFieldsFormState extends State<YearlyFieldsForm> {
+  late TextEditingController vcPercent, vcDr, vcCr, interestDue, interestPaid, percentile;
+
+  @override
+  void initState() {
+    super.initState();
+    final a = yearlyAdjustment(widget.year, widget.memberId);
+    vcPercent = TextEditingController(text: _textValue(a['vcPercent']));
+    vcDr = TextEditingController(text: _textValue(a['vcDr']));
+    vcCr = TextEditingController(text: _textValue(a['vcCr']));
+    interestDue = TextEditingController(text: _textValue(a['interestDue']));
+    interestPaid = TextEditingController(text: _textValue(a['interestPaid']));
+    percentile = TextEditingController(text: _textValue(a['percentile']));
+  }
+
+  String _textValue(dynamic v) {
+    final n = _toNum(v);
+    return n == 0 ? '' : '${n.round()}';
+  }
+
+  @override
+  void dispose() {
+    vcPercent.dispose(); vcDr.dispose(); vcCr.dispose(); interestDue.dispose(); interestPaid.dispose(); percentile.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        Expanded(child: _numField('VC (%)', vcPercent, '0')),
+        const SizedBox(width: 10),
+        Expanded(child: _numField('Percentile', percentile, '0')),
+      ]),
+      Row(children: [
+        Expanded(child: _numField('VC (DR)', vcDr, '0')),
+        const SizedBox(width: 10),
+        Expanded(child: _numField('VC (CR)', vcCr, '0')),
+      ]),
+      Row(children: [
+        Expanded(child: _numField('Interest due', interestDue, '0')),
+        const SizedBox(width: 10),
+        Expanded(child: _numField('Interest paid', interestPaid, '0')),
+      ]),
+      const SizedBox(height: 16),
+      primaryButton('Save VC fields', () {
+        store.update((d) {
+          final root = d['yearlyAdjustments'] as Map;
+          final yr = Map<String, dynamic>.from((root['${widget.year}'] as Map?) ?? {});
+          yr[widget.memberId] = {
+            'vcPercent': num.tryParse(vcPercent.text.trim()) ?? 0,
+            'vcDr': num.tryParse(vcDr.text.trim()) ?? 0,
+            'vcCr': num.tryParse(vcCr.text.trim()) ?? 0,
+            'interestDue': num.tryParse(interestDue.text.trim()) ?? 0,
+            'interestPaid': num.tryParse(interestPaid.text.trim()) ?? 0,
+            'percentile': num.tryParse(percentile.text.trim()) ?? 0,
+          };
+          root['${widget.year}'] = yr;
+        });
+        widget.onSaved?.call();
+        Navigator.pop(context);
+      }),
+    ]);
+  }
+
+  Widget _numField(String label, TextEditingController c, String hint) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        fieldLabel(label),
+        TextField(controller: c, keyboardType: TextInputType.number, style: jk(16), decoration: fieldDeco(hint)),
+      ]);
+}
+
 /* ====================== Settings ====================== */
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -1164,7 +1564,20 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   Widget build(BuildContext context) {
     return ListView(children: [
-      const PageHead('Settings', 'Group rules & data'),
+      const PageHead('More', 'Report, group rules & data'),
+      Container(
+        margin: const EdgeInsets.symmetric(horizontal: 18),
+        padding: const EdgeInsets.all(18),
+        decoration: cardDeco(),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('VC Year Report', style: fr(20)),
+          const SizedBox(height: 8),
+          Text('Excel જેવી yearly sheet: Jan-Dec collection, penalty, VC(%), VC(DR), VC(CR), total અને interest fields.', style: jk(13.5, color: sage)),
+          const SizedBox(height: 14),
+          ghostButton('Open VC [Year] Report', () => openSheet(context, 'VC Year Report', const YearlyReportPage())),
+        ]),
+      ),
+      const SizedBox(height: 14),
       Container(
         margin: const EdgeInsets.symmetric(horizontal: 18),
         padding: const EdgeInsets.all(18),
@@ -1232,6 +1645,8 @@ class _SettingsPageState extends State<SettingsPage> {
               store.update((d) {
                 d['members'] = [];
                 d['contributions'] = {};
+                d['penalties'] = {};
+                d['yearlyAdjustments'] = {};
                 d['loans'] = [];
               });
             }
