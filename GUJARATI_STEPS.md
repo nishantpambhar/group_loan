@@ -1,25 +1,111 @@
-# APK કેવી રીતે મેળવવી — સહેલી રીત (GitHub, computer setup વગર)
+# Group Loan App - Gujarati Steps
 
-આ project માં cloud-build file (`.github/workflows/build.yml`) પહેલેથી છે.
-GitHub પર upload કરતાં જ APK આપોઆપ બની જશે.
+આ ZIP final changes સાથે છે.
 
-## પગલાં
-1. **GitHub.com** પર free account બનાવો.
-2. **New repository** બનાવો (નામ ગમે તે, દા.ત. `group-loan-app`).
-3. આ folder ની બધી ફાઈલો એ repository માં upload કરો
-   (વેબસાઈટ પર "Add file → Upload files" — `.zip` ખોલીને બધું drag કરો).
-   ⚠️ `.github` folder પણ ચોક્કસ upload થાય એ જોજો.
-4. ઉપર **Actions** tab પર જાઓ. Build આપોઆપ ચાલુ થઈ જશે
-   (ન થાય તો "Build APK" → "Run workflow" દબાવો).
-5. થોડી મિનિટ રાહ જુઓ → લીલી ✓ આવે પછી એ run પર tap કરો.
-6. નીચે **Artifacts** માં **group-loan-apk** download કરો → zip ખોલો →
-   અંદર **app-release.apk** મળશે.
-7. એ APK phone માં મોકલો → Settings માં **"Unknown apps install"** ON કરો →
-   APK પર tap કરી install કરો. ✅
+## Add થયેલા features
 
-## નોંધ
-- Phone માં install કરવા આ **APK** ચાલે.
-- **Play Store** પર મૂકવા `.aab` જોઈએ — workflow માં
-  `flutter build apk --release` ની જગ્યાએ `flutter build appbundle` કરો,
-  અને artifact path `build/app/outputs/bundle/release/app-release.aab` કરો.
-- App નું નામ/icon બદલવા README.md જુઓ.
+- Month change fix
+- Excel જેવી VC yearly report
+- Collection penalty fix
+- Dashboardમાં penalty amount update
+- Interest card click popup
+  - Interest expected
+  - Interest credit / received
+  - Interest due
+- Loan delete ના બદલે paid history
+- WhatsApp પર full data share
+- WhatsApp પર VC report share
+- Firebase cloud sync
+
+## Firebase sync કેવી રીતે કામ કરશે
+
+બધા phoneમાં same data જોવા માટે same Group Code નાખવો.
+
+Example:
+
+```text
+Group Code: SB2026
+```
+
+Phone 1 માં member add કરશો તો Firebaseમાં save થશે અને Phone 2/Phone 3 માં same Group Code હશે તો same data દેખાશે.
+
+Sync થતું data:
+
+```text
+Members
+Collection paid/pending
+Penalty
+Loans
+Loan payments
+Paid loan history
+Interest
+VC yearly report
+Settings
+```
+
+## Firebase Consoleમાં જરૂરી setup
+
+Firebase project ID:
+
+```text
+group-loan-app-cc5d2
+```
+
+આ બે વસ્તુ enable હોવી જોઈએ:
+
+1. Firestore Database
+   - Create database
+   - Test mode રાખી શકો શરૂઆતમાં
+2. Authentication
+   - Anonymous sign-in enable કરવું
+
+## GitHub update કેવી રીતે કરવું
+
+ZIP extract કરો અને GitHub repoમાં આ files replace/upload કરો:
+
+```text
+lib/main.dart
+lib/firebase_options.dart
+pubspec.yaml
+.github/workflows/build.yml
+README.md
+GUJARATI_STEPS.md
+android/app/google-services.json
+```
+
+Minimum required files:
+
+```text
+lib/main.dart
+lib/firebase_options.dart
+pubspec.yaml
+```
+
+## APK build
+
+1. GitHubમાં commit કરો.
+2. Actions tab ખોલો.
+3. Latest Build Android Release run green success થાય ત્યાં સુધી wait કરો.
+4. Artifactsમાંથી `group-loan-android-release` download કરો.
+5. ZIP extract કરો.
+6. `app-release.apk` install કરો.
+
+## Appમાં Firebase connect
+
+App open કરો → More tab → Firebase Cloud Sync
+
+Group Code નાખો:
+
+```text
+SB2026
+```
+
+પછી **Connect / Switch Group** click કરો.
+
+Status જો આવું દેખાય તો sync OK:
+
+```text
+Cloud sync active (SB2026)
+```
+
+જો error આવે તો Firebase Consoleમાં Firestore અને Anonymous Authentication enable છે કે નહીં check કરો.
