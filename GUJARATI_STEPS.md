@@ -109,3 +109,13 @@ Cloud sync active (SB2026)
 ```
 
 જો error આવે તો Firebase Consoleમાં Firestore અને Anonymous Authentication enable છે કે નહીં check કરો.
+
+
+## WhatsApp PDF share
+
+Appમાં હવે WhatsApp share text તરીકે નહીં જાય. PDF file generate થશે.
+
+- More -> Share all data PDF on WhatsApp
+- More -> VC Year Report -> Share VC report PDF on WhatsApp
+
+Button દબાવો પછી Android share sheetમાં WhatsApp select કરો.

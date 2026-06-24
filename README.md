@@ -97,3 +97,11 @@ flutter build appbundle --release
 - If the new APK does not install over the old one, uninstall the old app first and install the new APK.
 - If cloud sync shows error, verify Firestore and Anonymous Authentication are enabled.
 - Keep the same Group Code on all phones for shared data.
+
+
+## PDF WhatsApp share
+
+The WhatsApp share buttons now generate PDF files and open the Android share sheet. Select WhatsApp to send the PDF file instead of plain text.
+
+- More -> VC Year Report -> Share VC report PDF on WhatsApp
+- More -> Data -> Share all data PDF on WhatsApp
