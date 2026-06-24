@@ -1,121 +1,49 @@
-# Group Loan App - Gujarati Steps
+# Group Loan App Gujarati Steps
 
-આ ZIP final changes સાથે છે.
+## Firebase માં જરૂરી setting
 
-## Add થયેલા features
-
-- Month change fix
-- Excel જેવી VC yearly report
-- Collection penalty fix
-- Dashboardમાં penalty amount update
-- Interest card click popup
-  - Interest expected
-  - Interest credit / received
-  - Interest due
-- Loan delete ના બદલે paid history
-- WhatsApp પર full data share
-- WhatsApp પર VC report share
-- Firebase cloud sync
-
-## Firebase sync કેવી રીતે કામ કરશે
-
-બધા phoneમાં same data જોવા માટે same Group Code નાખવો.
-
-Example:
-
-```text
-Group Code: SB2026
-```
-
-Phone 1 માં member add કરશો તો Firebaseમાં save થશે અને Phone 2/Phone 3 માં same Group Code હશે તો same data દેખાશે.
-
-Sync થતું data:
-
-```text
-Members
-Collection paid/pending
-Penalty
-Loans
-Loan payments
-Paid loan history
-Interest
-VC yearly report
-Settings
-```
-
-## Firebase Consoleમાં જરૂરી setup
-
-Firebase project ID:
-
-```text
-group-loan-app-cc5d2
-```
-
-આ બે વસ્તુ enable હોવી જોઈએ:
+APK test કરતા પહેલા Firebase Console માં આ 3 વસ્તુ enable કરો:
 
 1. Firestore Database
-   - Create database
-   - Test mode રાખી શકો શરૂઆતમાં
-2. Authentication
-   - Anonymous sign-in enable કરવું
+2. Authentication → Anonymous
+3. Authentication → Phone
 
-## GitHub update કેવી રીતે કરવું
+Phone OTP release APK માં properly ચાલે એ માટે Firebase Console → Project settings → Android app માં SHA-1 અને SHA-256 add કરવી પડશે.
 
-ZIP extract કરો અને GitHub repoમાં આ files replace/upload કરો:
+## App માં Firebase Sync
 
-```text
-lib/main.dart
-lib/firebase_options.dart
-pubspec.yaml
-.github/workflows/build.yml
-README.md
-GUJARATI_STEPS.md
-android/app/google-services.json
-```
+1. App open કરો
+2. More tab ખોલો
+3. Firebase Cloud Sync section માં Group Code નાખો
+4. Example: SB2026
+5. Connect / Switch Group દબાવો
+6. Status: Cloud sync active (SB2026) દેખાય તો sync OK
 
-Minimum required files:
+## Phone Login
 
-```text
-lib/main.dart
-lib/firebase_options.dart
-pubspec.yaml
-```
+1. More tab ખોલો
+2. Phone Login & Role section માં જાઓ
+3. Mobile number country code સાથે નાખો
+   Example: +919999999999
+4. Send OTP દબાવો
+5. OTP નાખીને Verify OTP & Login દબાવો
 
-## APK build
+## Admin / Member system
 
-1. GitHubમાં commit કરો.
-2. Actions tab ખોલો.
-3. Latest Build Android Release run green success થાય ત્યાં સુધી wait કરો.
-4. Artifactsમાંથી `group-loan-android-release` download કરો.
-5. ZIP extract કરો.
-6. `app-release.apk` install કરો.
+- Group માં સૌથી પહેલા જે phone login કરશે તે Admin બની જશે.
+- Admin બધું add/edit/delete કરી શકશે.
+- બીજો phone same Group Code થી login કરશે તો Member view-only રહેશે.
+- Member data જોઈ શકશે અને PDF share કરી શકશે, પણ edit/delete નહીં કરી શકે.
 
-## Appમાં Firebase connect
+## WhatsApp PDF Share
 
-App open કરો → More tab → Firebase Cloud Sync
+More માં:
 
-Group Code નાખો:
+- Share VC report PDF on WhatsApp
+- Share all data PDF on WhatsApp
 
-```text
-SB2026
-```
+Button દબાવ્યા પછી PDF generate થશે અને share sheet ખુલશે. ત્યાં WhatsApp select કરવું.
 
-પછી **Connect / Switch Group** click કરો.
+## GitHub APK build
 
-Status જો આવું દેખાય તો sync OK:
-
-```text
-Cloud sync active (SB2026)
-```
-
-જો error આવે તો Firebase Consoleમાં Firestore અને Anonymous Authentication enable છે કે નહીં check કરો.
-
-
-## WhatsApp PDF share
-
-Appમાં હવે WhatsApp share text તરીકે નહીં જાય. PDF file generate થશે.
-
-- More -> Share all data PDF on WhatsApp
-- More -> VC Year Report -> Share VC report PDF on WhatsApp
-
-Button દબાવો પછી Android share sheetમાં WhatsApp select કરો.
+ZIP extract કરીને GitHub repoમાં files replace કરો. પછી Actions tab માં latest green build open કરો અને `group-loan-android-release` artifact download કરો.

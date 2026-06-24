@@ -1,107 +1,66 @@
 # Group Loan App
 
-Luxury dark green + gold Flutter app for group collection, loans, interest, penalty and VC yearly reporting.
+Luxury dark green + gold Flutter app for group savings, collections, loans, penalty, VC yearly report, WhatsApp PDF sharing, Firebase cloud sync, and phone login.
 
-## Final features included
+## Included features
 
-- Month navigation fix: previous/next month works correctly.
-- Collection page member-wise paid/pending tracking.
-- Member-wise monthly penalty entry.
-- Dashboard penalty calculation includes collection penalty.
-- Interest card popup:
-  - Interest expected
-  - Interest credit / received
-  - Interest due
-- Loan paid history:
-  - Active loan can be moved to paid history instead of deleting data.
-  - Loan payment/interest data is not lost.
-- Excel-style VC yearly report:
-  - JAN to DEC contribution
-  - Penalty
-  - VC (%)
-  - VC (DR)
-  - VC (CR)
-  - Total
-  - Interest due
-  - Interest paid
-  - Percentile
-  - Additional penalty notes
-- WhatsApp share:
-  - Full group report
-  - VC yearly report
-- Firebase cloud sync:
-  - Same Group Code shows same data on all phones.
-  - Members, collections, penalties, loans, paid history, interest and VC report sync to Firestore.
-  - Local storage fallback remains available.
+- Month navigation fix
+- Member management
+- Monthly collection paid/pending
+- Member-wise monthly penalty
+- Loan issue, EMI, interest, paid history
+- Interest expected / received / due popup
+- Excel-style VC Year Report
+- Full data PDF share on WhatsApp
+- VC report PDF share on WhatsApp
+- Firebase Firestore cloud sync
+- Same Group Code on multiple phones shows same data
+- Phone number OTP login
+- Admin / Member role system
 
-## Firebase project
+## Firebase setup required
 
-Project ID: `group-loan-app-cc5d2`
-Android package in Firebase config: `com.example.group_loan`
+Firebase project used by this build:
 
-The app uses `lib/firebase_options.dart` for Android Firebase configuration and includes `android/app/google-services.json` for reference.
+- Project ID: `group-loan-app-cc5d2`
+- Android package: `com.example.group_loan`
 
-## Required Firebase console setup
-
-Before building/testing Firebase sync, enable these in Firebase Console:
+Enable these in Firebase Console before testing phone login:
 
 1. Firestore Database
-   - Create database
-   - Start in test mode for initial testing
-2. Authentication
-   - Enable Anonymous sign-in
+2. Authentication → Anonymous
+3. Authentication → Phone
 
-## Cloud data structure
+For release APK phone OTP, add SHA-1 and SHA-256 fingerprints in Firebase Console → Project settings → Your apps → Android app.
 
-Firestore stores one document per group code:
+## App setup
 
-```text
-groups
-  └── SB2026
-       ├── groupCode
-       ├── appData
-       ├── createdAt
-       ├── updatedAt
-       └── updatedBy
-```
+Open the app:
 
-Use the same Group Code, for example `SB2026`, on every phone to see the same data.
+1. More → Firebase Cloud Sync
+2. Group Code: `SB2026`
+3. Connect / Switch Group
+4. More → Phone Login & Role
+5. Enter phone number with country code, e.g. `+919999999999`
+6. Send OTP → Verify OTP
+
+The first phone that logs in for a group becomes Admin if no Admin phone is already set.
+
+## Role behavior
+
+- Admin: can add, edit, delete, save collection, issue loans, move loans to paid history, reset/clear data.
+- Member: can view synced group data and share PDF reports, but cannot edit/delete data.
+- Guest: if Admin is already set, guest acts as view-only.
 
 ## GitHub Actions build
 
-The workflow builds APK and AAB:
+This repo can build APK + AAB using GitHub Actions.
 
-```text
-.github/workflows/build.yml
-```
+Artifact name:
 
-After commit:
+`group-loan-android-release`
 
-1. Open GitHub repo.
-2. Go to Actions.
-3. Open latest successful Build Android Release run.
-4. Download artifact: `group-loan-android-release`.
-5. Extract ZIP.
-6. Install `app-release.apk`.
+Inside artifact:
 
-## Local build commands
-
-```bash
-flutter pub get
-flutter build apk --release
-flutter build appbundle --release
-```
-
-## Important notes
-
-- If the new APK does not install over the old one, uninstall the old app first and install the new APK.
-- If cloud sync shows error, verify Firestore and Anonymous Authentication are enabled.
-- Keep the same Group Code on all phones for shared data.
-
-
-## PDF WhatsApp share
-
-The WhatsApp share buttons now generate PDF files and open the Android share sheet. Select WhatsApp to send the PDF file instead of plain text.
-
-- More -> VC Year Report -> Share VC report PDF on WhatsApp
-- More -> Data -> Share all data PDF on WhatsApp
+- `app-release.apk`
+- `app-release.aab`
