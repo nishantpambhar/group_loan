@@ -1,0 +1,66 @@
+name: Build Android Release
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter stable
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Show Flutter version
+        run: flutter --version
+
+      # This source zip intentionally keeps android/ out.
+      # The command below regenerates Android platform files without touching lib/main.dart.
+      - name: Generate Android platform files
+        run: flutter create . --platforms=android --project-name group_loan_app --org com.tanusartvibes
+
+      # Compatibility fix for Flutter/AGP 9 built-in Kotlin migration errors.
+      # Official Flutter migration tooling also uses these flags for unmigrated projects.
+      - name: Add Kotlin/AGP compatibility flags
+        shell: bash
+        run: |
+          touch android/gradle.properties
+          grep -qxF 'android.newDsl=false' android/gradle.properties || echo 'android.newDsl=false' >> android/gradle.properties
+          grep -qxF 'android.builtInKotlin=false' android/gradle.properties || echo 'android.builtInKotlin=false' >> android/gradle.properties
+          grep -qxF 'org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=2G -XX:ReservedCodeCacheSize=512m -XX:+HeapDumpOnOutOfMemoryError' android/gradle.properties || echo 'org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=2G -XX:ReservedCodeCacheSize=512m -XX:+HeapDumpOnOutOfMemoryError' >> android/gradle.properties
+
+      - name: Set app display name
+        shell: bash
+        run: |
+          sed -i 's/android:label="group_loan_app"/android:label="Group Loan"/g' android/app/src/main/AndroidManifest.xml || true
+
+      - name: Install packages
+        run: flutter pub get
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Build release AAB
+        run: flutter build appbundle --release
+
+      - name: Upload APK and AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: group-loan-android-release
+          path: |
+            build/app/outputs/flutter-apk/app-release.apk
+            build/app/outputs/bundle/release/app-release.aab
