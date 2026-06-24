@@ -31,7 +31,7 @@ jobs:
       # This source zip intentionally keeps android/ out.
       # The command below regenerates Android platform files without touching lib/main.dart.
       - name: Generate Android platform files
-        run: flutter create . --platforms=android --project-name group_loan_app --org com.tanusartvibes
+        run: flutter create . --platforms=android --project-name group_loan --org com.example
 
       # Compatibility fix for Flutter/AGP 9 built-in Kotlin migration errors.
       # Official Flutter migration tooling also uses these flags for unmigrated projects.
@@ -46,7 +46,7 @@ jobs:
       - name: Set app display name
         shell: bash
         run: |
-          sed -i 's/android:label="group_loan_app"/android:label="Group Loan"/g' android/app/src/main/AndroidManifest.xml || true
+          sed -i 's/android:label="group_loan"/android:label="Group Loan"/g' android/app/src/main/AndroidManifest.xml || true
 
       - name: Install packages
         run: flutter pub get
