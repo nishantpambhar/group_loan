@@ -147,6 +147,10 @@ class AppStore extends ChangeNotifier {
   bool cloudSaving = false;
   String cloudStatus = 'Local storage only';
 
+  String adminPhone = '';
+  bool roleLoading = false;
+  String roleStatus = 'Phone login optional';
+
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _cloudSub;
   DocumentReference<Map<String, dynamic>>? _groupRef;
   bool _applyingRemote = false;
@@ -176,6 +180,90 @@ class AppStore extends ChangeNotifier {
   String sanitizeGroupCode(String value) {
     final cleaned = value.trim().toUpperCase().replaceAll(RegExp(r'[^A-Z0-9_-]'), '');
     return cleaned.isEmpty ? 'SB2026' : cleaned;
+  }
+
+  String normalizePhone(String value) {
+    var v = value.trim().replaceAll(RegExp(r'[^0-9+]'), '');
+    if (v.startsWith('+')) return v;
+    if (v.length == 10) return '+91$v';
+    if (v.startsWith('91') && v.length == 12) return '+$v';
+    return v;
+  }
+
+  String get currentPhone => normalizePhone(FirebaseAuth.instance.currentUser?.phoneNumber ?? '');
+  bool get isPhoneLoggedIn => currentPhone.isNotEmpty;
+  bool get isAdmin => adminPhone.isNotEmpty && normalizePhone(adminPhone) == currentPhone;
+  bool get canEditData => adminPhone.isEmpty || isAdmin;
+  String get roleLabel {
+    if (!isPhoneLoggedIn) return adminPhone.isEmpty ? 'Guest / setup pending' : 'Guest view-only';
+    if (adminPhone.isEmpty) return 'Admin setup pending';
+    return isAdmin ? 'Admin' : 'Member view-only';
+  }
+
+  void _readRoleFromDoc(Map<String, dynamic>? doc) {
+    final value = doc?['adminPhone'];
+    adminPhone = value is String ? normalizePhone(value) : '';
+    if (adminPhone.isEmpty) {
+      roleStatus = isPhoneLoggedIn ? 'No admin set yet. Login phone can become admin.' : 'Phone login required for admin setup.';
+    } else {
+      roleStatus = isAdmin ? 'Logged in as Admin' : 'Logged in as Member / view-only';
+    }
+  }
+
+  Future<void> refreshRole() async {
+    if (_groupRef == null) {
+      roleStatus = 'Cloud group not connected';
+      notifyListeners();
+      return;
+    }
+    try {
+      roleLoading = true;
+      notifyListeners();
+      final snap = await _groupRef!.get();
+      _readRoleFromDoc(snap.data());
+      roleLoading = false;
+      notifyListeners();
+    } catch (e) {
+      roleLoading = false;
+      roleStatus = 'Role check error: $e';
+      notifyListeners();
+    }
+  }
+
+  Future<void> ensureAdminForLoggedPhone() async {
+    if (_groupRef == null || !isPhoneLoggedIn) return;
+    final phone = currentPhone;
+    try {
+      final snap = await _groupRef!.get();
+      final existing = snap.data()?['adminPhone'];
+      if (existing is String && existing.trim().isNotEmpty) {
+        adminPhone = normalizePhone(existing);
+      } else {
+        adminPhone = phone;
+        await _groupRef!.set({
+          'adminPhone': phone,
+          'adminCreatedAt': FieldValue.serverTimestamp(),
+          'adminUid': FirebaseAuth.instance.currentUser?.uid ?? '',
+        }, SetOptions(merge: true));
+      }
+      roleStatus = isAdmin ? 'Logged in as Admin' : 'Logged in as Member / view-only';
+      notifyListeners();
+    } catch (e) {
+      roleStatus = 'Admin role setup error: $e';
+      notifyListeners();
+    }
+  }
+
+  Future<void> logoutPhoneKeepCloud() async {
+    try {
+      await FirebaseAuth.instance.signOut();
+      await FirebaseAuth.instance.signInAnonymously();
+      roleStatus = 'Logged out. Guest view-only if admin is set.';
+      await connectCloud(groupCode);
+    } catch (e) {
+      roleStatus = 'Logout failed: $e';
+      notifyListeners();
+    }
   }
 
   void _normalize() {
@@ -251,6 +339,7 @@ class AppStore extends ChangeNotifier {
       await _cloudSub?.cancel();
       _groupRef = FirebaseFirestore.instance.collection('groups').doc(groupCode);
       final snap = await _groupRef!.get();
+      _readRoleFromDoc(snap.data());
 
       if (snap.exists && snap.data()?['appData'] is Map) {
         _applyingRemote = true;
@@ -268,13 +357,19 @@ class AppStore extends ChangeNotifier {
         }, SetOptions(merge: true));
       }
 
+      await ensureAdminForLoggedPhone();
+
       cloudReady = true;
       cloudStatus = 'Cloud sync active ($groupCode)';
       notifyListeners();
 
       _cloudSub = _groupRef!.snapshots().listen((snapshot) async {
+        _readRoleFromDoc(snapshot.data());
         final remote = snapshot.data()?['appData'];
-        if (remote is! Map) return;
+        if (remote is! Map) {
+          notifyListeners();
+          return;
+        }
         _applyingRemote = true;
         data = Map<String, dynamic>.from(remote);
         _normalize();
@@ -703,6 +798,18 @@ Future<void> sharePdfOnWhatsApp(BuildContext context, {required String title, re
 }
 
 late AppStore store;
+
+bool requireAdminAccess(BuildContext context) {
+  if (store.canEditData) return true;
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text('Only Admin can add/edit/delete data. Please login with admin phone number.', style: jk(14, color: ink)),
+      backgroundColor: gold2,
+      behavior: SnackBarBehavior.floating,
+    ),
+  );
+  return false;
+}
 
 Future<void> initFirebaseSafely() async {
   try {
@@ -1255,7 +1362,7 @@ class MembersPage extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         PageHead('Members', '${members.length} in the circle',
-            action: addButton('+ Add', () => openSheet(context, 'Add member', const AddMemberForm()))),
+            action: addButton('+ Add', () { if (!requireAdminAccess(context)) return; openSheet(context, 'Add member', const AddMemberForm()); })),
         Expanded(
           child: ListView.separated(
             padding: const EdgeInsets.symmetric(horizontal: 18),
@@ -1308,6 +1415,7 @@ class _AddMemberFormState extends State<AddMemberForm> {
       TextField(controller: phone, keyboardType: TextInputType.phone, style: jk(16), decoration: fieldDeco('99000 00000')),
       const SizedBox(height: 16),
       primaryButton('Add to group', () {
+        if (!requireAdminAccess(context)) return;
         if (name.text.trim().isEmpty) return;
         store.update((d) => (d['members'] as List).add({'id': uid(), 'name': name.text.trim(), 'phone': phone.text.trim()}));
         Navigator.pop(context);
@@ -1383,6 +1491,7 @@ class _MemberDetailState extends State<MemberDetail> {
       ]),
       const SizedBox(height: 18),
       dangerButton('Remove member', () async {
+        if (!requireAdminAccess(context)) return;
         if (await confirmDialog(context, 'Remove ${m['name']} and all their records?')) {
           store.update((d) {
             (d['members'] as List).removeWhere((x) => x['id'] == widget.memberId);
@@ -1452,6 +1561,7 @@ class _CollectionPageState extends State<CollectionPage> {
       Padding(
         padding: const EdgeInsets.fromLTRB(18, 4, 18, 8),
         child: ghostButton('Mark everyone paid', () {
+          if (!requireAdminAccess(context)) return;
           store.update((d) {
             final contribs = d['contributions'] as Map;
             final mo = Map<String, dynamic>.from((contribs[month] as Map?) ?? {});
@@ -1480,11 +1590,12 @@ class _CollectionPageState extends State<CollectionPage> {
                   Text(pen > 0 ? '${inr(monthly)} · Penalty ${inr(pen)}' : inr(monthly), style: jk(12.5, color: pen > 0 ? clay : sage)),
                 ])),
                 IconButton(
-                  onPressed: () => openSheet(context, '${m['name']} · ${monthLabel(month)}', CollectionEntryForm(memberId: m['id'] as String, month: month, onSaved: () => setState(() {}))),
+                  onPressed: () { if (!requireAdminAccess(context)) return; openSheet(context, '${m['name']} · ${monthLabel(month)}', CollectionEntryForm(memberId: m['id'] as String, month: month, onSaved: () => setState(() {}))); },
                   icon: Icon(Icons.edit_note_outlined, color: pen > 0 ? clay : sage, size: 22),
                 ),
                 GestureDetector(
                   onTap: () {
+                    if (!requireAdminAccess(context)) return;
                     store.update((d) {
                       final contribs = d['contributions'] as Map;
                       final mo = Map<String, dynamic>.from((contribs[month] as Map?) ?? {});
@@ -1574,6 +1685,7 @@ class _CollectionEntryFormState extends State<CollectionEntryForm> {
       TextField(controller: penalty, keyboardType: TextInputType.number, style: jk(16), decoration: fieldDeco('0')),
       const SizedBox(height: 16),
       primaryButton('Save entry', () {
+        if (!requireAdminAccess(context)) return;
         store.update((d) {
           final contribs = d['contributions'] as Map;
           final mo = Map<String, dynamic>.from((contribs[widget.month] as Map?) ?? {});
@@ -1607,7 +1719,7 @@ class LoansPage extends StatelessWidget {
     final active = loans.where((l) => !isLoanArchived(l as Map) && computeLoan(l, s)['remaining'] > 0).length;
     return Column(children: [
       PageHead('Loans', '$active active',
-          action: addButton('+ Issue', () => openSheet(context, 'Issue a loan', const AddLoanForm()))),
+          action: addButton('+ Issue', () { if (!requireAdminAccess(context)) return; openSheet(context, 'Issue a loan', const AddLoanForm()); })),
       Expanded(
         child: ListView(
           padding: const EdgeInsets.fromLTRB(18, 0, 18, 12),
@@ -1726,6 +1838,7 @@ class _AddLoanFormState extends State<AddLoanForm> {
       ),
       const SizedBox(height: 16),
       primaryButton('Issue loan', () {
+        if (!requireAdminAccess(context)) return;
         if (memberId == null || (double.tryParse(amount.text) ?? 0) <= 0) return;
         store.update((d) => (d['loans'] as List).add({
               'id': uid(), 'memberId': memberId, 'amount': double.parse(amount.text),
@@ -1763,6 +1876,7 @@ class _LoanDetailState extends State<LoanDetail> {
     final archived = isLoanArchived(loan as Map);
 
     void record(double v) {
+      if (!requireAdminAccess(context)) return;
       if (v <= 0) return;
       store.update((d) {
         final l = (d['loans'] as List).firstWhere((x) => x['id'] == widget.loanId);
@@ -1835,6 +1949,7 @@ class _LoanDetailState extends State<LoanDetail> {
       const SizedBox(height: 16),
       if (!archived)
         dangerButton('Move to paid history', () async {
+          if (!requireAdminAccess(context)) return;
           if (await confirmDialog(context, 'Move this loan to paid history? Remaining amount will be added as settlement payment, so interest/payment data will not be deleted.')) {
             store.update((d) {
               final l = (d['loans'] as List).firstWhere((x) => x['id'] == widget.loanId);
@@ -2003,7 +2118,7 @@ class YearMemberCard extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 12),
-        ghostButton('Edit VC / Interest fields', () => openSheet(context, '${member['name']} · VC [$year]', YearlyFieldsForm(memberId: id, year: year, onSaved: onChanged))),
+        ghostButton('Edit VC / Interest fields', () { if (!requireAdminAccess(context)) return; openSheet(context, '${member['name']} · VC [$year]', YearlyFieldsForm(memberId: id, year: year, onSaved: onChanged)); }),
       ]),
     );
   }
@@ -2085,6 +2200,7 @@ class _YearlyFieldsFormState extends State<YearlyFieldsForm> {
       ]),
       const SizedBox(height: 16),
       primaryButton('Save VC fields', () {
+        if (!requireAdminAccess(context)) return;
         store.update((d) {
           final root = d['yearlyAdjustments'] as Map;
           final yr = Map<String, dynamic>.from((root['${widget.year}'] as Map?) ?? {});
@@ -2108,6 +2224,157 @@ class _YearlyFieldsFormState extends State<YearlyFieldsForm> {
         fieldLabel(label),
         TextField(controller: c, keyboardType: TextInputType.number, style: jk(16), decoration: fieldDeco(hint)),
       ]);
+}
+
+
+/* ====================== Phone Login / Roles ====================== */
+class PhoneLoginCard extends StatefulWidget {
+  const PhoneLoginCard({super.key});
+  @override
+  State<PhoneLoginCard> createState() => _PhoneLoginCardState();
+}
+
+class _PhoneLoginCardState extends State<PhoneLoginCard> {
+  late TextEditingController phone;
+  final otp = TextEditingController();
+  String verificationId = '';
+  bool codeSent = false;
+  bool loading = false;
+  String message = '';
+
+  @override
+  void initState() {
+    super.initState();
+    phone = TextEditingController(text: store.currentPhone.isNotEmpty ? store.currentPhone : '+91');
+  }
+
+  @override
+  void dispose() {
+    phone.dispose();
+    otp.dispose();
+    super.dispose();
+  }
+
+  Future<void> _sendOtp() async {
+    final normalized = store.normalizePhone(phone.text);
+    if (!normalized.startsWith('+') || normalized.length < 11) {
+      setState(() => message = 'Please enter valid phone number with country code, e.g. +919999999999');
+      return;
+    }
+    setState(() { loading = true; message = 'Sending OTP...'; });
+    try {
+      await FirebaseAuth.instance.verifyPhoneNumber(
+        phoneNumber: normalized,
+        timeout: const Duration(seconds: 60),
+        verificationCompleted: (PhoneAuthCredential credential) async {
+          try {
+            await FirebaseAuth.instance.signInWithCredential(credential);
+            await store.connectCloud(store.groupCode);
+            if (mounted) {
+              setState(() { loading = false; message = 'Phone login successful.'; });
+            }
+          } catch (e) {
+            if (mounted) setState(() { loading = false; message = 'Auto verification failed: $e'; });
+          }
+        },
+        verificationFailed: (FirebaseAuthException e) {
+          if (mounted) setState(() { loading = false; message = e.message ?? 'OTP failed. Check Firebase Phone provider and SHA-1/SHA-256.'; });
+        },
+        codeSent: (String id, int? resendToken) {
+          if (mounted) setState(() { loading = false; codeSent = true; verificationId = id; message = 'OTP sent to $normalized'; });
+        },
+        codeAutoRetrievalTimeout: (String id) {
+          verificationId = id;
+        },
+      );
+    } catch (e) {
+      if (mounted) setState(() { loading = false; message = 'OTP send failed: $e'; });
+    }
+  }
+
+  Future<void> _verifyOtp() async {
+    if (verificationId.isEmpty || otp.text.trim().length < 4) {
+      setState(() => message = 'Enter OTP first.');
+      return;
+    }
+    setState(() { loading = true; message = 'Verifying OTP...'; });
+    try {
+      final credential = PhoneAuthProvider.credential(verificationId: verificationId, smsCode: otp.text.trim());
+      await FirebaseAuth.instance.signInWithCredential(credential);
+      await store.connectCloud(store.groupCode);
+      if (mounted) setState(() { loading = false; message = 'Phone login successful.'; });
+    } on FirebaseAuthException catch (e) {
+      if (mounted) setState(() { loading = false; message = e.message ?? 'Invalid OTP.'; });
+    } catch (e) {
+      if (mounted) setState(() { loading = false; message = 'Login failed: $e'; });
+    }
+  }
+
+  Future<void> _logout() async {
+    setState(() { loading = true; message = 'Logging out...'; });
+    await store.logoutPhoneKeepCloud();
+    if (mounted) setState(() { loading = false; codeSent = false; otp.clear(); message = 'Phone logout complete.'; });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final logged = store.isPhoneLoggedIn;
+    final isAdmin = store.isAdmin;
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 18),
+      padding: const EdgeInsets.all(18),
+      decoration: cardDeco(),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(logged ? Icons.verified_user_outlined : Icons.phone_android_outlined, color: logged ? paidC : gold2),
+          const SizedBox(width: 10),
+          Expanded(child: Text('Phone Login & Role', style: fr(20))),
+        ]),
+        const SizedBox(height: 8),
+        Text('Admin phone full access રાખશે. Other phone same Group Codeથી data જોઈ શકશે, પણ edit/delete માટે Admin login જોઈએ.', style: jk(13.5, color: sage)),
+        const SizedBox(height: 12),
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(color: forest2, border: Border.all(color: line), borderRadius: BorderRadius.circular(13)),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Current role: ${store.roleLabel}', style: jk(13.5, w: FontWeight.w700, color: isAdmin ? paidC : gold2)),
+            const SizedBox(height: 4),
+            Text(logged ? 'Logged phone: ${store.currentPhone}' : 'Phone login not done', style: jk(12.5, color: sage)),
+            if (store.adminPhone.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text('Admin phone: ${store.adminPhone}', style: jk(12.5, color: sage)),
+            ],
+            const SizedBox(height: 4),
+            Text(store.roleStatus, style: jk(12.5, color: isAdmin ? paidC : sage)),
+          ]),
+        ),
+        const SizedBox(height: 12),
+        fieldLabel('Mobile number'),
+        TextField(controller: phone, keyboardType: TextInputType.phone, style: jk(16), decoration: fieldDeco('+919999999999')),
+        const SizedBox(height: 10),
+        if (codeSent) ...[
+          fieldLabel('OTP'),
+          TextField(controller: otp, keyboardType: TextInputType.number, style: jk(16), decoration: fieldDeco('6 digit OTP')),
+          const SizedBox(height: 10),
+        ],
+        if (message.isNotEmpty) ...[
+          Text(message, style: jk(12.5, color: message.toLowerCase().contains('failed') || message.toLowerCase().contains('invalid') ? clay : paidC)),
+          const SizedBox(height: 10),
+        ],
+        if (!logged) ...[
+          primaryButton(loading ? 'Please wait...' : (codeSent ? 'Verify OTP & Login' : 'Send OTP'), loading ? null : (codeSent ? _verifyOtp : _sendOtp)),
+          if (codeSent) ...[
+            const SizedBox(height: 10),
+            ghostButton('Resend OTP', loading ? () {} : _sendOtp),
+          ],
+        ] else ...[
+          primaryButton(loading ? 'Please wait...' : 'Refresh Role', loading ? null : () async { await store.refreshRole(); if (mounted) setState(() {}); }),
+          const SizedBox(height: 10),
+          dangerButton('Logout phone login', loading ? () {} : _logout),
+        ],
+      ]),
+    );
+  }
 }
 
 /* ====================== Settings ====================== */
@@ -2164,6 +2431,8 @@ class _SettingsPageState extends State<SettingsPage> {
           }),
         ]),
       ),
+      const SizedBox(height: 14),
+      const PhoneLoginCard(),
       const SizedBox(height: 14),
       Container(
         margin: const EdgeInsets.symmetric(horizontal: 18),
@@ -2223,6 +2492,7 @@ class _SettingsPageState extends State<SettingsPage> {
           ]),
           const SizedBox(height: 16),
           primaryButton('Save rules', () {
+            if (!requireAdminAccess(context)) return;
             store.update((d) {
               final s = d['settings'] as Map;
               s['groupName'] = gname.text.trim().isEmpty ? 'My Group' : gname.text.trim();
@@ -2254,12 +2524,14 @@ class _SettingsPageState extends State<SettingsPage> {
           }),
           const SizedBox(height: 10),
           ghostButton('Reset to sample data', () async {
+            if (!requireAdminAccess(context)) return;
             if (await confirmDialog(context, 'Reset all data and restore the sample group? This cannot be undone.')) {
               store.replace(seedData());
             }
           }),
           const SizedBox(height: 10),
           dangerButton('Clear all data', () async {
+            if (!requireAdminAccess(context)) return;
             if (await confirmDialog(context, 'Delete everything — all members, collections and loans? This leaves an empty group.')) {
               store.update((d) {
                 d['members'] = [];
