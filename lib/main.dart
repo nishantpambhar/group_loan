@@ -1,11 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -490,7 +494,7 @@ String buildLoansShareText() {
   }
   for (final item in store.loans) {
     final loan = item as Map;
-    final member = store.members.firstWhere((x) => x['id'] == loan['memberId'], orElse: () => {'name': '—'}) as Map;
+    final member = store.members.firstWhere((x) => x['id'] == loan['memberId'], orElse: () => {'name': '-'}) as Map;
     final c = computeLoan(loan, store.settings);
     final archived = isLoanArchived(loan);
     b.writeln('${member['name']} (${archived ? 'Paid history' : c['status']})');
@@ -586,13 +590,113 @@ String buildFullShareText({int? year}) {
   return b.toString();
 }
 
-Future<void> shareOnWhatsApp(BuildContext context, String text, {String subject = 'Group Loan Report'}) async {
+String _safePdfText(String value) {
+  return value
+      .replaceAll('₹', 'Rs.')
+      .replaceAll('—', '-')
+      .replaceAll('–', '-')
+      .replaceAll('•', '-')
+      .replaceAll(RegExp(r'[^\x09\x0A\x0D\x20-\x7E]'), '');
+}
+
+String _safePdfFileName(String value) {
+  final base = value
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+      .replaceAll(RegExp(r'_+'), '_')
+      .replaceAll(RegExp(r'^_|_$'), '');
+  return base.isEmpty ? 'group_loan_report' : base;
+}
+
+pw.Widget _pdfReportLine(String rawLine) {
+  final line = _safePdfText(rawLine);
+  if (line.trim().isEmpty) return pw.SizedBox(height: 6);
+
+  final isMainHeading = line == line.toUpperCase() && line.length <= 42 && !line.contains(':');
+  final isSubHeading = !line.startsWith('  ') && line.length <= 50 && !line.contains('|') && !line.contains(':') && !line.contains('Rs.');
+
+  if (isMainHeading) {
+    return pw.Container(
+      margin: const pw.EdgeInsets.only(top: 10, bottom: 6),
+      padding: const pw.EdgeInsets.symmetric(vertical: 5, horizontal: 8),
+      decoration: pw.BoxDecoration(
+        color: PdfColor.fromHex('#103127'),
+        borderRadius: pw.BorderRadius.circular(6),
+      ),
+      child: pw.Text(line, style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold, color: PdfColors.white)),
+    );
+  }
+
+  return pw.Padding(
+    padding: pw.EdgeInsets.only(left: line.startsWith('  ') ? 10 : 0, bottom: 3),
+    child: pw.Text(
+      line,
+      style: pw.TextStyle(
+        fontSize: isSubHeading ? 10.5 : 9.5,
+        fontWeight: isSubHeading ? pw.FontWeight.bold : pw.FontWeight.normal,
+        color: PdfColor.fromHex('#091A15'),
+      ),
+    ),
+  );
+}
+
+Future<File> createReportPdfFile({required String title, required String body, required String filePrefix}) async {
+  final pdf = pw.Document();
+  final safeTitle = _safePdfText(title);
+  final safeBody = _safePdfText(body);
+  final generatedAt = DateFormat('dd MMM yyyy, hh:mm a').format(DateTime.now());
+
+  pdf.addPage(
+    pw.MultiPage(
+      pageFormat: PdfPageFormat.a4,
+      margin: const pw.EdgeInsets.all(24),
+      header: (context) => pw.Container(
+        padding: const pw.EdgeInsets.only(bottom: 10),
+        decoration: const pw.BoxDecoration(border: pw.Border(bottom: pw.BorderSide(width: 0.6, color: PdfColors.grey500))),
+        child: pw.Row(
+          mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+          crossAxisAlignment: pw.CrossAxisAlignment.end,
+          children: [
+            pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+              pw.Text(_safePdfText('${store.settings['groupName']}'), style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold, color: PdfColor.fromHex('#103127'))),
+              pw.SizedBox(height: 2),
+              pw.Text(safeTitle, style: pw.TextStyle(fontSize: 10, color: PdfColor.fromHex('#C9A86A'), fontWeight: pw.FontWeight.bold)),
+            ]),
+            pw.Text('Generated: $generatedAt', style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700)),
+          ],
+        ),
+      ),
+      footer: (context) => pw.Align(
+        alignment: pw.Alignment.centerRight,
+        child: pw.Text('Page ${context.pageNumber} of ${context.pagesCount}', style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey600)),
+      ),
+      build: (context) => [
+        pw.SizedBox(height: 12),
+        ...safeBody.split('\n').map(_pdfReportLine),
+      ],
+    ),
+  );
+
+  final dir = await getTemporaryDirectory();
+  final stamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+  final file = File('${dir.path}/${_safePdfFileName(filePrefix)}_$stamp.pdf');
+  await file.writeAsBytes(await pdf.save(), flush: true);
+  return file;
+}
+
+Future<void> sharePdfOnWhatsApp(BuildContext context, {required String title, required String body, required String filePrefix}) async {
   try {
-    await Share.share(text, subject: subject);
-  } catch (_) {
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Share failed. Please try again.', style: jk(14, color: ink)), backgroundColor: clay, behavior: SnackBarBehavior.floating),
+        SnackBar(content: Text('PDF તૈયાર થઈ રહી છે...', style: jk(14, color: ink)), backgroundColor: gold2, behavior: SnackBarBehavior.floating),
+      );
+    }
+    final file = await createReportPdfFile(title: title, body: body, filePrefix: filePrefix);
+    await Share.shareXFiles([XFile(file.path)], subject: title);
+  } catch (e) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('PDF share failed. Please try again.', style: jk(14, color: ink)), backgroundColor: clay, behavior: SnackBarBehavior.floating),
       );
     }
   }
@@ -1079,7 +1183,7 @@ class Dashboard extends StatelessWidget {
                 Padding(padding: const EdgeInsets.symmetric(vertical: 8), child: Text('No active loans yet.', style: jk(13.5, color: sage)))
               else
                 ...activeLoans.take(3).map((l) {
-                  final m = store.members.firstWhere((x) => x['id'] == l['memberId'], orElse: () => {'name': '—'});
+                  final m = store.members.firstWhere((x) => x['id'] == l['memberId'], orElse: () => {'name': '-'});
                   final c = computeLoan(l, s);
                   return Padding(
                     padding: const EdgeInsets.symmetric(vertical: 10),
@@ -1510,7 +1614,7 @@ class LoansPage extends StatelessWidget {
           children: [
             if (loans.isEmpty) Padding(padding: const EdgeInsets.all(8), child: Text('No loans yet.', style: jk(13.5, color: sage))),
             ...loans.map((l) {
-              final m = store.members.firstWhere((x) => x['id'] == l['memberId'], orElse: () => {'name': '—'});
+              final m = store.members.firstWhere((x) => x['id'] == l['memberId'], orElse: () => {'name': '-'});
               final c = computeLoan(l, s);
               final archived = isLoanArchived(l as Map);
               final pct = (c['totalPayable'] as num) > 0 ? (c['paid'] as num) / (c['totalPayable'] as num) : 0.0;
@@ -2072,9 +2176,14 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 14),
           ghostButton('Open VC [Year] Report', () => openSheet(context, 'VC Year Report', const YearlyReportPage())),
           const SizedBox(height: 10),
-          ghostButton('Share VC report on WhatsApp', () async {
+          ghostButton('Share VC report PDF on WhatsApp', () async {
             final y = DateTime.now().year;
-            await shareOnWhatsApp(context, buildVcYearShareText(y), subject: 'VC [$y] Report');
+            await sharePdfOnWhatsApp(
+              context,
+              title: 'VC [$y] Report',
+              body: buildVcYearShareText(y),
+              filePrefix: 'VC_${y}_Report',
+            );
           }),
         ]),
       ),
@@ -2135,8 +2244,13 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 8),
           Text('Everything is stored privately on this device. Reset restores the sample group; Clear empties it completely.', style: jk(13.5, color: sage)),
           const SizedBox(height: 14),
-          ghostButton('Share all data on WhatsApp', () async {
-            await shareOnWhatsApp(context, buildFullShareText(), subject: 'Full Group Loan Report');
+          ghostButton('Share all data PDF on WhatsApp', () async {
+            await sharePdfOnWhatsApp(
+              context,
+              title: 'Full Group Loan Report',
+              body: buildFullShareText(),
+              filePrefix: 'Full_Group_Loan_Report',
+            );
           }),
           const SizedBox(height: 10),
           ghostButton('Reset to sample data', () async {
