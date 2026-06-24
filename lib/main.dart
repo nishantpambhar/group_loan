@@ -1,9 +1,15 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'firebase_options.dart';
 
 /* ====================== palette ====================== */
 const ink = Color(0xFF091A15);
@@ -77,6 +83,24 @@ Map<String, dynamic> computeLoan(Map loan, Map settings, [DateTime? asOf]) {
   };
 }
 
+
+bool isLoanArchived(Map loan) => loan['archived'] == true;
+
+num loanInterestReceived(Map loan, Map settings) {
+  final c = computeLoan(loan, settings);
+  final paid = _toNum(c['paid']).toDouble();
+  final totalPayable = _toNum(c['totalPayable']).toDouble();
+  final interest = _toNum(c['interest']).toDouble();
+  if (paid <= 0 || totalPayable <= 0 || interest <= 0) return 0;
+  // Flat-interest EMI: received interest is counted proportionally from every payment.
+  return min(interest, paid * interest / totalPayable);
+}
+
+num loanInterestDue(Map loan, Map settings) {
+  final c = computeLoan(loan, settings);
+  return max(0, _toNum(c['interest']) - loanInterestReceived(loan, settings));
+}
+
 /* ====================== seed ====================== */
 Map<String, dynamic> seedData() {
   final names = [
@@ -112,9 +136,20 @@ Map<String, dynamic> seedData() {
 class AppStore extends ChangeNotifier {
   Map<String, dynamic> data = {};
   static const _key = 'gloan_data_v1';
+  static const _groupKey = 'gloan_group_code_v1';
+
+  String groupCode = 'SB2026';
+  bool cloudReady = false;
+  bool cloudSaving = false;
+  String cloudStatus = 'Local storage only';
+
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _cloudSub;
+  DocumentReference<Map<String, dynamic>>? _groupRef;
+  bool _applyingRemote = false;
 
   Future<void> load() async {
     final p = await SharedPreferences.getInstance();
+    groupCode = sanitizeGroupCode(p.getString(_groupKey) ?? 'SB2026');
     final raw = p.getString(_key);
     if (raw == null) {
       data = seedData();
@@ -131,6 +166,12 @@ class AppStore extends ChangeNotifier {
         await p.setString(_key, jsonEncode(data));
       }
     }
+    await connectCloud(groupCode);
+  }
+
+  String sanitizeGroupCode(String value) {
+    final cleaned = value.trim().toUpperCase().replaceAll(RegExp(r'[^A-Z0-9_-]'), '');
+    return cleaned.isEmpty ? 'SB2026' : cleaned;
   }
 
   void _normalize() {
@@ -147,13 +188,113 @@ class AppStore extends ChangeNotifier {
     data['loans'] ??= [];
   }
 
-  Future<void> _persist() async {
+  Map<String, dynamic> _cleanForFirestore(Map<String, dynamic> value) {
+    return Map<String, dynamic>.from(jsonDecode(jsonEncode(value)) as Map);
+  }
+
+  Future<void> _persistLocal() async {
     final p = await SharedPreferences.getInstance();
     await p.setString(_key, jsonEncode(data));
+    await p.setString(_groupKey, groupCode);
+  }
+
+  Future<void> _persist() async {
+    await _persistLocal();
+    await _persistCloud();
+  }
+
+  Future<void> _persistCloud() async {
+    if (!cloudReady || _applyingRemote || _groupRef == null) return;
+    try {
+      cloudSaving = true;
+      cloudStatus = 'Cloud sync saving... ($groupCode)';
+      notifyListeners();
+      await _groupRef!.set({
+        'groupCode': groupCode,
+        'appData': _cleanForFirestore(data),
+        'updatedAt': FieldValue.serverTimestamp(),
+        'updatedBy': FirebaseAuth.instance.currentUser?.uid ?? 'anonymous',
+      }, SetOptions(merge: true));
+      cloudStatus = 'Cloud sync active ($groupCode)';
+    } catch (e) {
+      cloudReady = false;
+      cloudStatus = 'Cloud sync error: $e';
+    } finally {
+      cloudSaving = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> connectCloud(String code) async {
+    groupCode = sanitizeGroupCode(code);
+    await _persistLocal();
+
+    if (Firebase.apps.isEmpty) {
+      cloudReady = false;
+      cloudStatus = 'Firebase not connected. Data is saved on this phone only.';
+      notifyListeners();
+      return;
+    }
+
+    try {
+      if (FirebaseAuth.instance.currentUser == null) {
+        await FirebaseAuth.instance.signInAnonymously();
+      }
+
+      cloudStatus = 'Connecting cloud sync... ($groupCode)';
+      notifyListeners();
+
+      await _cloudSub?.cancel();
+      _groupRef = FirebaseFirestore.instance.collection('groups').doc(groupCode);
+      final snap = await _groupRef!.get();
+
+      if (snap.exists && snap.data()?['appData'] is Map) {
+        _applyingRemote = true;
+        data = Map<String, dynamic>.from(snap.data()!['appData'] as Map);
+        _normalize();
+        await _persistLocal();
+        _applyingRemote = false;
+      } else {
+        await _groupRef!.set({
+          'groupCode': groupCode,
+          'appData': _cleanForFirestore(data),
+          'createdAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+          'updatedBy': FirebaseAuth.instance.currentUser?.uid ?? 'anonymous',
+        }, SetOptions(merge: true));
+      }
+
+      cloudReady = true;
+      cloudStatus = 'Cloud sync active ($groupCode)';
+      notifyListeners();
+
+      _cloudSub = _groupRef!.snapshots().listen((snapshot) async {
+        final remote = snapshot.data()?['appData'];
+        if (remote is! Map) return;
+        _applyingRemote = true;
+        data = Map<String, dynamic>.from(remote);
+        _normalize();
+        await _persistLocal();
+        _applyingRemote = false;
+        cloudReady = true;
+        cloudStatus = 'Cloud sync active ($groupCode)';
+        notifyListeners();
+      }, onError: (Object e) {
+        cloudReady = false;
+        cloudStatus = 'Cloud sync error: $e';
+        notifyListeners();
+      });
+    } catch (e) {
+      _applyingRemote = false;
+      cloudReady = false;
+      cloudStatus = 'Cloud sync error: $e';
+      notifyListeners();
+    }
   }
 
   void update(void Function(Map<String, dynamic>) mut) {
     mut(data);
+    _normalize();
     _persist();
     notifyListeners();
   }
@@ -165,6 +306,12 @@ class AppStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  @override
+  void dispose() {
+    _cloudSub?.cancel();
+    super.dispose();
+  }
+
   Map get settings => data['settings'] as Map;
   List get members => data['members'] as List;
   Map get contributions => data['contributions'] as Map;
@@ -172,7 +319,6 @@ class AppStore extends ChangeNotifier {
   Map get yearlyAdjustments => data['yearlyAdjustments'] as Map;
   List get loans => data['loans'] as List;
 }
-
 
 bool isContributionPaid(dynamic v) => v == 'paid' || (v is Map && v['status'] == 'paid');
 
@@ -190,6 +336,30 @@ num monthlyPenalty(String month, String memberId) {
   final mo = root[month];
   if (mo is! Map) return 0;
   return _toNum(mo[memberId]);
+}
+
+
+num monthPenaltyTotal(String month, {bool paidOnly = false}) {
+  final root = store.data['penalties'];
+  if (root is! Map) return 0;
+  final mo = root[month];
+  if (mo is! Map) return 0;
+  final contribMo = (store.contributions[month] as Map?) ?? {};
+  num total = 0;
+  mo.forEach((memberId, value) {
+    if (!paidOnly || isContributionPaid(contribMo[memberId])) total += _toNum(value);
+  });
+  return total;
+}
+
+num allCollectionPenaltyTotal({bool paidOnly = false}) {
+  final root = store.data['penalties'];
+  if (root is! Map) return 0;
+  num total = 0;
+  root.forEach((month, value) {
+    if (value is Map) total += monthPenaltyTotal(month as String, paidOnly: paidOnly);
+  });
+  return total;
 }
 
 Map<String, dynamic> yearlyAdjustment(int year, String memberId) {
@@ -222,6 +392,7 @@ num yearContributionTotal(int year, String memberId) {
   return total;
 }
 
+
 String penaltyNotes(int year, String memberId) {
   final notes = <String>[];
   for (var i = 1; i <= 12; i++) {
@@ -231,10 +402,218 @@ String penaltyNotes(int year, String memberId) {
   return notes.isEmpty ? 'Penalty:' : 'Penalty:${notes.join(', ')}';
 }
 
+String _plainMoney(num n) => 'Rs.${NumberFormat.decimalPattern('en_IN').format(n.round())}';
+String _paidText(bool paid) => paid ? 'Paid' : 'Pending';
+String _percentText(num n) => n == 0 ? '-' : '${n.toStringAsFixed(n % 1 == 0 ? 0 : 2)}%';
+
+Map<String, num> dashboardTotals() {
+  final s = store.settings;
+  final monthly = _toNum(s['monthly']);
+  num totalContrib = 0;
+  num disbursed = 0;
+  num repaid = 0;
+  num interestExpected = 0;
+  num interestReceived = 0;
+  num loanPenalty = 0;
+  num outstanding = 0;
+
+  store.contributions.forEach((month, value) {
+    if (value is Map) {
+      value.forEach((memberId, status) {
+        if (isContributionPaid(status)) {
+          totalContrib += monthly;
+          totalContrib += monthlyPenalty(month as String, memberId as String);
+        }
+      });
+    }
+  });
+
+  for (final item in store.loans) {
+    final loan = item as Map;
+    final c = computeLoan(loan, s);
+    disbursed += _toNum(c['principal']);
+    repaid += _toNum(c['paid']);
+    interestExpected += _toNum(c['interest']);
+    interestReceived += loanInterestReceived(loan, s);
+    if (!isLoanArchived(loan)) {
+      loanPenalty += _toNum(c['penalty']);
+      outstanding += _toNum(c['remaining']);
+    }
+  }
+
+  final collectionPenalty = allCollectionPenaltyTotal();
+  return {
+    'cash': totalContrib + repaid - disbursed,
+    'members': store.members.length,
+    'loansOut': outstanding,
+    'interestExpected': interestExpected,
+    'interestReceived': interestReceived,
+    'interestDue': max<num>(0, interestExpected - interestReceived),
+    'penalty': loanPenalty + collectionPenalty,
+    'collectionPenalty': collectionPenalty,
+  };
+}
+
+String buildCurrentMonthShareText(String month) {
+  final monthly = _toNum(store.settings['monthly']);
+  final monthC = (store.contributions[month] as Map?) ?? {};
+  final b = StringBuffer();
+  num collected = 0;
+  num pending = 0;
+
+  b.writeln('COLLECTION - ${monthLabel(month)}');
+  for (final mem in store.members) {
+    final m = mem as Map;
+    final id = m['id'] as String;
+    final paid = isContributionPaid(monthC[id]);
+    final penalty = monthlyPenalty(month, id);
+    final amount = monthly + penalty;
+    if (paid) {
+      collected += amount;
+    } else {
+      pending += amount;
+    }
+    b.writeln('${m['name']}: ${_paidText(paid)} | Monthly ${_plainMoney(monthly)} | Penalty ${_plainMoney(penalty)} | Total ${_plainMoney(amount)}');
+  }
+  b.writeln('Collected: ${_plainMoney(collected)}');
+  b.writeln('Pending: ${_plainMoney(pending)}');
+  b.writeln('Total: ${_plainMoney(collected + pending)}');
+  return b.toString();
+}
+
+String buildLoansShareText() {
+  final b = StringBuffer();
+  b.writeln('LOANS');
+  if (store.loans.isEmpty) {
+    b.writeln('No loans yet.');
+    return b.toString();
+  }
+  for (final item in store.loans) {
+    final loan = item as Map;
+    final member = store.members.firstWhere((x) => x['id'] == loan['memberId'], orElse: () => {'name': '—'}) as Map;
+    final c = computeLoan(loan, store.settings);
+    final archived = isLoanArchived(loan);
+    b.writeln('${member['name']} (${archived ? 'Paid history' : c['status']})');
+    b.writeln('  Principal: ${_plainMoney(_toNum(c['principal']))}');
+    b.writeln('  Interest: ${_plainMoney(_toNum(c['interest']))}');
+    b.writeln('  Total payable: ${_plainMoney(_toNum(c['totalPayable']))}');
+    b.writeln('  Paid: ${_plainMoney(_toNum(c['paid']))}');
+    b.writeln('  Remaining: ${_plainMoney(_toNum(c['remaining']))}');
+    b.writeln('  EMI: ${_plainMoney(_toNum(c['emi']))} | Rate: ${loan['rate']}% | Months: ${loan['months']}');
+    b.writeln('');
+  }
+  return b.toString();
+}
+
+String buildVcYearShareText(int year) {
+  final b = StringBuffer();
+  final monthly = _toNum(store.settings['monthly']);
+  num grandContribution = 0;
+  num grandPenalty = 0;
+  num grandTotal = 0;
+  num grandInterestDue = 0;
+  num grandInterestPaid = 0;
+
+  b.writeln('VC [$year] YEAR REPORT');
+  b.writeln('Monthly amount: ${_plainMoney(monthly)}');
+  b.writeln('');
+
+  for (final item in store.members) {
+    final member = item as Map;
+    final id = member['id'] as String;
+    final contribution = yearContributionTotal(year, id);
+    final penalty = yearPenaltyTotal(year, id);
+    final vcPercent = yearlyAdjustmentValue(year, id, 'vcPercent');
+    final vcDr = yearlyAdjustmentValue(year, id, 'vcDr');
+    final vcCr = yearlyAdjustmentValue(year, id, 'vcCr');
+    final interestDue = yearlyAdjustmentValue(year, id, 'interestDue');
+    final interestPaid = yearlyAdjustmentValue(year, id, 'interestPaid');
+    final percentile = yearlyAdjustmentValue(year, id, 'percentile');
+    final total = contribution + penalty + vcCr - vcDr;
+
+    grandContribution += contribution;
+    grandPenalty += penalty;
+    grandInterestDue += interestDue;
+    grandInterestPaid += interestPaid;
+    grandTotal += total;
+
+    final monthVals = <String>[];
+    for (var i = 1; i <= 12; i++) {
+      final paid = isContributionPaid(((store.contributions[ym(year, i)] as Map?) ?? {})[id]);
+      monthVals.add('${_mon[i - 1].toUpperCase()}:${paid ? monthly.round() : '-'}');
+    }
+
+    b.writeln(member['name']);
+    b.writeln('  ${monthVals.join(' | ')}');
+    b.writeln('  Penalty: ${_plainMoney(penalty)} | VC(%): ${_percentText(vcPercent)} | VC(DR): ${_plainMoney(vcDr)} | VC(CR): ${_plainMoney(vcCr)}');
+    b.writeln('  Interest due: ${_plainMoney(interestDue)} | Interest paid: ${_plainMoney(interestPaid)} | Percentile: ${_percentText(percentile)}');
+    b.writeln('  Total: ${_plainMoney(total)} | ${penaltyNotes(year, id)}');
+    b.writeln('');
+  }
+
+  b.writeln('VC [$year] TOTAL');
+  b.writeln('Contribution: ${_plainMoney(grandContribution)}');
+  b.writeln('Penalty: ${_plainMoney(grandPenalty)}');
+  b.writeln('Interest due: ${_plainMoney(grandInterestDue)}');
+  b.writeln('Interest paid: ${_plainMoney(grandInterestPaid)}');
+  b.writeln('Total: ${_plainMoney(grandTotal)}');
+  return b.toString();
+}
+
+String buildFullShareText({int? year}) {
+  final y = year ?? DateTime.now().year;
+  final tm = monthKeyOf(DateTime.now());
+  final totals = dashboardTotals();
+  final b = StringBuffer();
+  b.writeln('GROUP LOAN REPORT');
+  b.writeln('${store.settings['groupName']}');
+  b.writeln('Generated: ${DateFormat('dd MMM yyyy, hh:mm a').format(DateTime.now())}');
+  b.writeln('');
+  b.writeln('SUMMARY');
+  b.writeln('Cash in hand: ${_plainMoney(_toNum(totals['cash']))}');
+  b.writeln('Members: ${store.members.length}');
+  b.writeln('Loans out: ${_plainMoney(_toNum(totals['loansOut']))}');
+  b.writeln('Interest expected: ${_plainMoney(_toNum(totals['interestExpected']))}');
+  b.writeln('Interest credit/received: ${_plainMoney(_toNum(totals['interestReceived']))}');
+  b.writeln('Interest due: ${_plainMoney(_toNum(totals['interestDue']))}');
+  b.writeln('Penalty accrued: ${_plainMoney(_toNum(totals['penalty']))}');
+  b.writeln('');
+  b.writeln(buildCurrentMonthShareText(tm));
+  b.writeln('');
+  b.writeln(buildLoansShareText());
+  b.writeln('');
+  b.writeln(buildVcYearShareText(y));
+  return b.toString();
+}
+
+Future<void> shareOnWhatsApp(BuildContext context, String text, {String subject = 'Group Loan Report'}) async {
+  try {
+    await Share.share(text, subject: subject);
+  } catch (_) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Share failed. Please try again.', style: jk(14, color: ink)), backgroundColor: clay, behavior: SnackBarBehavior.floating),
+      );
+    }
+  }
+}
+
 late AppStore store;
+
+Future<void> initFirebaseSafely() async {
+  try {
+    await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+    if (FirebaseAuth.instance.currentUser == null) {
+      await FirebaseAuth.instance.signInAnonymously();
+    }
+  } catch (e) {
+    debugPrint('Firebase init failed: $e');
+  }
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await initFirebaseSafely();
   store = AppStore();
   await store.load();
   runApp(const GroupLoanApp());
@@ -369,21 +748,27 @@ class Avatar extends StatelessWidget {
 class Tile extends StatelessWidget {
   final String label, value;
   final Color valueColor;
-  const Tile(this.label, this.value, {this.valueColor = ivory, super.key});
+  final VoidCallback? onTap;
+  const Tile(this.label, this.value, {this.valueColor = ivory, this.onTap, super.key});
   @override
   Widget build(BuildContext context) {
-    return Container(
+    final box = Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 15),
       decoration: cardDeco(),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label, style: jk(11.5, color: sage)),
+          Row(children: [
+            Expanded(child: Text(label, style: jk(11.5, color: sage))),
+            if (onTap != null) const Icon(Icons.touch_app_outlined, color: sage, size: 14),
+          ]),
           const SizedBox(height: 7),
           Text(value, style: fr(23, color: valueColor)),
         ],
       ),
     );
+    if (onTap == null) return box;
+    return GestureDetector(onTap: onTap, child: box);
   }
 }
 
@@ -392,6 +777,7 @@ Widget statusPill(String status) {
     'ontrack': ['On track', paidC, const Color(0x2462BD8F)],
     'overdue': ['Overdue', clay, const Color(0x29D68160)],
     'closed': ['Closed', sage, const Color(0x248AA094)],
+    'history': ['Paid history', gold2, const Color(0x22C9A86A)],
   };
   final m = map[status]!;
   return Container(
@@ -432,7 +818,7 @@ Widget fieldLabel(String s) => Padding(
       child: Text(s, style: jk(12, color: sage)),
     );
 
-Widget primaryButton(String label, VoidCallback onTap) => SizedBox(
+Widget primaryButton(String label, VoidCallback? onTap) => SizedBox(
       width: double.infinity,
       child: ElevatedButton(
         onPressed: onTap,
@@ -564,20 +950,31 @@ class Dashboard extends StatelessWidget {
     final paidCount = members.where((m) => isContributionPaid(monthC[m['id']])).length;
     final monthly = (s['monthly'] as num);
 
-    double totalContrib = 0, disbursed = 0, repaid = 0, interestExp = 0, penalty = 0, outstanding = 0;
+    double totalContrib = 0, disbursed = 0, repaid = 0, interestExp = 0, interestReceived = 0, loanPenalty = 0, outstanding = 0;
     store.contributions.forEach((k, mo) {
-      totalContrib += (mo as Map).values.where(isContributionPaid).length * monthly;
+      final monthMap = mo as Map;
+      monthMap.forEach((memberId, status) {
+        if (isContributionPaid(status)) {
+          totalContrib += monthly;
+          totalContrib += monthlyPenalty(k as String, memberId as String).toDouble();
+        }
+      });
     });
     for (final l in store.loans) {
       final c = computeLoan(l, s);
       disbursed += c['principal'];
       repaid += c['paid'];
       interestExp += c['interest'];
-      penalty += c['penalty'];
-      outstanding += c['remaining'];
+      interestReceived += loanInterestReceived(l, s).toDouble();
+      if (!isLoanArchived(l as Map)) {
+        loanPenalty += c['penalty'];
+        outstanding += c['remaining'];
+      }
     }
+    final collectionPenalty = allCollectionPenaltyTotal();
+    final penalty = loanPenalty + collectionPenalty;
     final cash = totalContrib + repaid - disbursed;
-    final activeLoans = store.loans.where((l) => computeLoan(l, s)['remaining'] > 0).toList();
+    final activeLoans = store.loans.where((l) => !isLoanArchived(l as Map) && computeLoan(l, s)['remaining'] > 0).toList();
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(18, 8, 18, 24),
@@ -627,7 +1024,8 @@ class Dashboard extends StatelessWidget {
         ]),
         const SizedBox(height: 12),
         Row(children: [
-          Expanded(child: Tile('Interest (expected)', inr(interestExp), valueColor: paidC)),
+          Expanded(child: Tile('Interest (expected)', inr(interestExp), valueColor: paidC,
+              onTap: () => openSheet(context, 'Interest details', InterestDetailsSheet(expected: interestExp, received: interestReceived)))),
           const SizedBox(width: 12),
           Expanded(child: Tile('Penalty (accrued)', inr(penalty), valueColor: clay)),
         ]),
@@ -708,6 +1106,39 @@ class Dashboard extends StatelessWidget {
       ],
     );
   }
+}
+
+class InterestDetailsSheet extends StatelessWidget {
+  final num expected;
+  final num received;
+  const InterestDetailsSheet({required this.expected, required this.received, super.key});
+  @override
+  Widget build(BuildContext context) {
+    final due = max(0, expected - received);
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Container(
+        padding: const EdgeInsets.all(15),
+        decoration: cardDeco(),
+        child: Column(children: [
+          _row('Interest (expected)', inr(expected), paidC),
+          const Divider(color: line, height: 22),
+          _row('Interest credit / received', inr(received), gold2),
+          const Divider(color: line, height: 22),
+          _row('Interest due', inr(due), due > 0 ? pendingC : sage),
+        ]),
+      ),
+      const SizedBox(height: 12),
+      Text('Loan payment થાય એટલે received interest auto update થશે. Loan paid historyમાં move કરશો તો બાકી amount settlement તરીકે add થશે અને interest delete નહીં થાય.', style: jk(12.5, color: sage)),
+    ]);
+  }
+
+  Widget _row(String label, String value, Color color) => Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Expanded(child: Text(label, style: jk(13, color: sage))),
+          Text(value, style: fr(18, color: color)),
+        ],
+      );
 }
 
 /* ====================== Members ====================== */
@@ -820,6 +1251,7 @@ class _MemberDetailState extends State<MemberDetail> {
       if (myLoans.isEmpty) Text('No loans taken.', style: jk(13.5, color: sage)),
       ...myLoans.map((l) {
         final c = computeLoan(l, s);
+        final archived = isLoanArchived(l as Map);
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 10),
           child: Row(children: [
@@ -828,9 +1260,9 @@ class _MemberDetailState extends State<MemberDetail> {
               Text('${l['rate']}% · ${l['months']} mo · ${monthLabel((l['date'] as String).substring(0, 7))}', style: jk(12.5, color: sage)),
             ])),
             Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-              Text('${inr(c['remaining'])} left', style: fr(15)),
+              Text(archived ? 'Paid history' : '${inr(c['remaining'])} left', style: fr(15)),
               const SizedBox(height: 3),
-              statusPill(c['status'] as String),
+              statusPill(archived ? 'history' : c['status'] as String),
             ]),
           ]),
         );
@@ -887,8 +1319,13 @@ class _CollectionPageState extends State<CollectionPage> {
     final members = store.members;
     final monthC = (store.contributions[month] as Map?) ?? {};
     final paid = members.where((m) => isContributionPaid(monthC[m['id']])).length;
-    final pendingAmt = (members.length - paid) * monthly;
     final penaltyAmt = members.fold<num>(0, (sum, m) => sum + monthlyPenalty(month, m['id'] as String));
+    final paidPenaltyAmt = members.fold<num>(0, (sum, m) {
+      final id = m['id'] as String;
+      return sum + (isContributionPaid(monthC[id]) ? monthlyPenalty(month, id) : 0);
+    });
+    final collectedAmt = paid * monthly + paidPenaltyAmt;
+    final pendingAmt = (members.length - paid) * monthly + (penaltyAmt - paidPenaltyAmt);
 
     return Column(children: [
       PageHead('Collection', '${inr(monthly)} per member'),
@@ -902,7 +1339,7 @@ class _CollectionPageState extends State<CollectionPage> {
         padding: const EdgeInsets.symmetric(vertical: 15),
         decoration: cardDeco(),
         child: Row(children: [
-          _strip('Collected', inr(paid * monthly), paidC),
+          _strip('Collected', inr(collectedAmt), paidC),
           _strip('Pending', inr(pendingAmt), pendingC),
           _strip('Penalty', inr(penaltyAmt), clay),
           _strip('Total', inr(members.length * monthly + penaltyAmt), ivory),
@@ -1063,7 +1500,7 @@ class LoansPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = store.settings;
     final loans = store.loans;
-    final active = loans.where((l) => computeLoan(l, s)['remaining'] > 0).length;
+    final active = loans.where((l) => !isLoanArchived(l as Map) && computeLoan(l, s)['remaining'] > 0).length;
     return Column(children: [
       PageHead('Loans', '$active active',
           action: addButton('+ Issue', () => openSheet(context, 'Issue a loan', const AddLoanForm()))),
@@ -1075,6 +1512,7 @@ class LoansPage extends StatelessWidget {
             ...loans.map((l) {
               final m = store.members.firstWhere((x) => x['id'] == l['memberId'], orElse: () => {'name': '—'});
               final c = computeLoan(l, s);
+              final archived = isLoanArchived(l as Map);
               final pct = (c['totalPayable'] as num) > 0 ? (c['paid'] as num) / (c['totalPayable'] as num) : 0.0;
               return GestureDetector(
                 onTap: () => openSheet(context, m['name'] as String, LoanDetail(loanId: l['id'] as String)),
@@ -1090,7 +1528,7 @@ class LoansPage extends StatelessWidget {
                         Text(m['name'] as String, style: jk(15, w: FontWeight.w600)),
                         Text('${monthLabel((l['date'] as String).substring(0, 7))} · ${l['rate']}% · ${l['months']} mo', style: jk(12.5, color: sage)),
                       ])),
-                      statusPill(c['status'] as String),
+                      statusPill(archived ? 'history' : c['status'] as String),
                     ]),
                     const SizedBox(height: 13),
                     ClipRRect(
@@ -1100,7 +1538,7 @@ class LoansPage extends StatelessWidget {
                     const SizedBox(height: 9),
                     Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
                       Text('${inr(c['paid'])} paid', style: jk(12.5, color: sage)),
-                      Text('${inr(c['remaining'])} left', style: jk(12.5, color: sage)),
+                      Text(archived ? 'Paid history' : '${inr(c['remaining'])} left', style: jk(12.5, color: sage)),
                     ]),
                   ]),
                 ),
@@ -1218,6 +1656,7 @@ class _LoanDetailState extends State<LoanDetail> {
     if (loan.isEmpty) return const SizedBox.shrink();
     final s = store.settings;
     final c = computeLoan(loan, s);
+    final archived = isLoanArchived(loan as Map);
 
     void record(double v) {
       if (v <= 0) return;
@@ -1236,6 +1675,14 @@ class _LoanDetailState extends State<LoanDetail> {
       Container(width: 48, height: 2, margin: const EdgeInsets.symmetric(vertical: 12),
           decoration: const BoxDecoration(gradient: LinearGradient(colors: [gold, Colors.transparent]))),
       Text('${inr(c['paid'])} of ${inr(c['totalPayable'])} paid', style: jk(13, color: sage)),
+      if (archived) ...[
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(color: const Color(0x22C9A86A), border: Border.all(color: line), borderRadius: BorderRadius.circular(13)),
+          child: Text('This loan is moved to paid history. Payment and interest are still counted in dashboard.', style: jk(12.5, color: gold2)),
+        ),
+      ],
       const SizedBox(height: 16),
       GridView.count(
         crossAxisCount: 2, shrinkWrap: true, physics: const NeverScrollableScrollPhysics(),
@@ -1258,18 +1705,20 @@ class _LoanDetailState extends State<LoanDetail> {
           decoration: BoxDecoration(color: const Color(0x1FD68160), border: Border.all(color: const Color(0x47D68160)), borderRadius: BorderRadius.circular(13)),
           child: Text('${c['behindMonths']} EMI(s) behind. Penalty of ${inr(c['penalty'])} has accrued at ${inr(s['penaltyAmount'])}/${s['penaltyType']}.', style: jk(13, color: clay)),
         ),
-      _sectionLabel('Record a payment'),
-      Row(children: [
-        Expanded(child: TextField(controller: payAmt, keyboardType: TextInputType.number, style: jk(16), decoration: fieldDeco(inr(c['emi'])))),
-        const SizedBox(width: 10),
-        ElevatedButton(
-          onPressed: () => record(double.tryParse(payAmt.text) ?? 0),
-          style: ElevatedButton.styleFrom(backgroundColor: gold, foregroundColor: ink, padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(13))),
-          child: Text('Add', style: jk(14, w: FontWeight.w700, color: ink)),
-        ),
-      ]),
-      const SizedBox(height: 10),
-      ghostButton('Pay one EMI · ${inr(c['emi'])}', () => record((c['emi'] as num).toDouble())),
+      if (!archived) ...[
+        _sectionLabel('Record a payment'),
+        Row(children: [
+          Expanded(child: TextField(controller: payAmt, keyboardType: TextInputType.number, style: jk(16), decoration: fieldDeco(inr(c['emi'])))),
+          const SizedBox(width: 10),
+          ElevatedButton(
+            onPressed: () => record(double.tryParse(payAmt.text) ?? 0),
+            style: ElevatedButton.styleFrom(backgroundColor: gold, foregroundColor: ink, padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(13))),
+            child: Text('Add', style: jk(14, w: FontWeight.w700, color: ink)),
+          ),
+        ]),
+        const SizedBox(height: 10),
+        ghostButton('Pay one EMI · ${inr(c['emi'])}', () => record((c['emi'] as num).toDouble())),
+      ],
       _sectionLabel('Payment history'),
       if ((loan['payments'] as List).isEmpty) Text('No payments yet.', style: jk(13.5, color: sage)),
       ...((loan['payments'] as List).reversed.map((p) => Padding(
@@ -1280,12 +1729,29 @@ class _LoanDetailState extends State<LoanDetail> {
             ]),
           ))),
       const SizedBox(height: 16),
-      dangerButton('Delete loan', () async {
-        if (await confirmDialog(context, 'Delete this loan and its payment history?')) {
-          store.update((d) => (d['loans'] as List).removeWhere((l) => l['id'] == widget.loanId));
-          if (context.mounted) Navigator.pop(context);
-        }
-      }),
+      if (!archived)
+        dangerButton('Move to paid history', () async {
+          if (await confirmDialog(context, 'Move this loan to paid history? Remaining amount will be added as settlement payment, so interest/payment data will not be deleted.')) {
+            store.update((d) {
+              final l = (d['loans'] as List).firstWhere((x) => x['id'] == widget.loanId);
+              final calc = computeLoan(l, d['settings'] as Map);
+              final remaining = _toNum(calc['remaining']).toDouble();
+              if (remaining > 0) {
+                (l['payments'] as List).add({
+                  'id': uid(),
+                  'date': '${monthKeyOf(DateTime.now())}-01',
+                  'amount': remaining,
+                  'note': 'Settlement while moving to paid history',
+                });
+              }
+              l['archived'] = true;
+              l['closedAt'] = DateTime.now().toIso8601String();
+            });
+            if (context.mounted) Navigator.pop(context);
+          }
+        })
+      else
+        Text('Paid historyમાં હોવાથી આ loan dashboardની active loan listમાં નહીં દેખાય.', style: jk(12.5, color: sage)),
     ]);
   }
 
@@ -1548,7 +2014,7 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
-  late TextEditingController gname, monthly, penalty;
+  late TextEditingController gname, monthly, penalty, groupCode;
   late String penaltyType;
   @override
   void initState() {
@@ -1557,14 +2023,44 @@ class _SettingsPageState extends State<SettingsPage> {
     gname = TextEditingController(text: s['groupName'] as String);
     monthly = TextEditingController(text: '${s['monthly']}');
     penalty = TextEditingController(text: '${s['penaltyAmount']}');
+    groupCode = TextEditingController(text: store.groupCode);
     penaltyType = s['penaltyType'] as String;
   }
   @override
-  void dispose() { gname.dispose(); monthly.dispose(); penalty.dispose(); super.dispose(); }
+  void dispose() { gname.dispose(); monthly.dispose(); penalty.dispose(); groupCode.dispose(); super.dispose(); }
   @override
   Widget build(BuildContext context) {
     return ListView(children: [
       const PageHead('More', 'Report, group rules & data'),
+      Container(
+        margin: const EdgeInsets.symmetric(horizontal: 18),
+        padding: const EdgeInsets.all(18),
+        decoration: cardDeco(),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(store.cloudReady ? Icons.cloud_done_outlined : Icons.cloud_off_outlined, color: store.cloudReady ? paidC : clay),
+            const SizedBox(width: 10),
+            Expanded(child: Text('Firebase Cloud Sync', style: fr(20))),
+          ]),
+          const SizedBox(height: 8),
+          Text('Same Group Code use કરશો તો બધા phoneમાં same members, collection, penalty, loans, interest અને VC report sync થશે.', style: jk(13.5, color: sage)),
+          const SizedBox(height: 12),
+          fieldLabel('Group Code'),
+          TextField(controller: groupCode, textCapitalization: TextCapitalization.characters, style: jk(16), decoration: fieldDeco('SB2026')),
+          const SizedBox(height: 10),
+          Text(store.cloudStatus, style: jk(12.5, color: store.cloudReady ? paidC : clay)),
+          const SizedBox(height: 14),
+          primaryButton(store.cloudSaving ? 'Syncing...' : 'Connect / Switch Group', store.cloudSaving ? null : () async {
+            await store.connectCloud(groupCode.text);
+            if (mounted) {
+              groupCode.text = store.groupCode;
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(store.cloudStatus, style: jk(14, color: ink)), backgroundColor: store.cloudReady ? gold2 : clay, behavior: SnackBarBehavior.floating));
+              setState(() {});
+            }
+          }),
+        ]),
+      ),
+      const SizedBox(height: 14),
       Container(
         margin: const EdgeInsets.symmetric(horizontal: 18),
         padding: const EdgeInsets.all(18),
@@ -1575,6 +2071,11 @@ class _SettingsPageState extends State<SettingsPage> {
           Text('Excel જેવી yearly sheet: Jan-Dec collection, penalty, VC(%), VC(DR), VC(CR), total અને interest fields.', style: jk(13.5, color: sage)),
           const SizedBox(height: 14),
           ghostButton('Open VC [Year] Report', () => openSheet(context, 'VC Year Report', const YearlyReportPage())),
+          const SizedBox(height: 10),
+          ghostButton('Share VC report on WhatsApp', () async {
+            final y = DateTime.now().year;
+            await shareOnWhatsApp(context, buildVcYearShareText(y), subject: 'VC [$y] Report');
+          }),
         ]),
       ),
       const SizedBox(height: 14),
@@ -1634,6 +2135,10 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 8),
           Text('Everything is stored privately on this device. Reset restores the sample group; Clear empties it completely.', style: jk(13.5, color: sage)),
           const SizedBox(height: 14),
+          ghostButton('Share all data on WhatsApp', () async {
+            await shareOnWhatsApp(context, buildFullShareText(), subject: 'Full Group Loan Report');
+          }),
+          const SizedBox(height: 10),
           ghostButton('Reset to sample data', () async {
             if (await confirmDialog(context, 'Reset all data and restore the sample group? This cannot be undone.')) {
               store.replace(seedData());
