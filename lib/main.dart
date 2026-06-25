@@ -1269,6 +1269,7 @@ Future<void> sharePdfOnWhatsApp(BuildContext context, {required String title, re
 }
 
 late AppStore store;
+final ValueNotifier<int> shellTabNotifier = ValueNotifier<int>(0);
 
 bool requireAdminAccess(BuildContext context) {
   if (store.canEditData) return true;
@@ -1447,6 +1448,27 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   int tab = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    shellTabNotifier.addListener(_onTabRequested);
+  }
+
+  void _onTabRequested() {
+    if (!mounted) return;
+    final next = shellTabNotifier.value;
+    if (next >= 0 && next <= 4 && next != tab) {
+      setState(() => tab = next);
+    }
+  }
+
+  @override
+  void dispose() {
+    shellTabNotifier.removeListener(_onTabRequested);
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final pages = [const Dashboard(), const MembersPage(), const CollectionPage(), const LoansPage(), const SettingsPage()];
@@ -1461,7 +1483,7 @@ class _HomeShellState extends State<HomeShell> {
         ),
         child: SafeArea(bottom: false, child: pages[tab]),
       ),
-      bottomNavigationBar: _TabBar(tab: tab, onTap: (i) => setState(() => tab = i)),
+      bottomNavigationBar: _TabBar(tab: tab, onTap: (i) { shellTabNotifier.value = i; setState(() => tab = i); }),
     );
   }
 }
@@ -2849,10 +2871,13 @@ class _PinLoginCardState extends State<PinLoginCard> {
     final role = widget.adminMode ? 'admin' : 'member';
     setState(() { loading = true; message = 'Checking PIN...'; });
     final ok = await store.loginWithPin(code: code, role: role, pin: pin.text);
+    if (ok) {
+      shellTabNotifier.value = 0;
+    }
     if (mounted) {
       setState(() {
         loading = false;
-        message = ok ? store.roleStatus : store.roleStatus;
+        message = ok ? '${store.roleStatus}. Dashboard open કરો.' : store.roleStatus;
       });
     }
   }
@@ -2923,6 +2948,8 @@ class _PinLoginCardState extends State<PinLoginCard> {
             loading ? null : _login,
           ),
         ] else ...[
+          primaryButton('Open Dashboard / Home', () { shellTabNotifier.value = 0; }),
+          const SizedBox(height: 10),
           primaryButton(loading ? 'Please wait...' : 'Refresh Role', loading ? null : () async { await store.refreshRole(); if (mounted) setState(() {}); }),
           const SizedBox(height: 10),
           dangerButton('Logout', _logout),
