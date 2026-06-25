@@ -1341,6 +1341,27 @@ void openDashboardHome() {
   Future.microtask(() => shellTabNotifier.value = 0);
 }
 
+void openDashboardHomeWithContext(BuildContext context) {
+  openDashboardHome();
+  Future.microtask(() {
+    if (!context.mounted) return;
+    Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const HomeShell()),
+      (route) => false,
+    );
+  });
+}
+
+void openLoginScreenWithContext(BuildContext context) {
+  Future.microtask(() {
+    if (!context.mounted) return;
+    Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const FirstLoginPage()),
+      (route) => false,
+    );
+  });
+}
+
 bool requireAdminAccess(BuildContext context) {
   if (store.canEditData) return true;
   ScaffoldMessenger.of(context).showSnackBar(
@@ -2977,21 +2998,23 @@ class _PinLoginCardState extends State<PinLoginCard> {
     final role = widget.adminMode ? 'admin' : 'member';
     setState(() { loading = true; message = 'Checking PIN...'; });
     final ok = await store.loginWithPin(code: code, role: role, pin: pin.text);
-    if (ok) {
-      openDashboardHome();
-      WidgetsBinding.instance.addPostFrameCallback((_) => openDashboardHome());
-    }
     if (mounted) {
       setState(() {
         loading = false;
-        message = ok ? '${store.roleStatus}. Dashboard open કરો.' : store.roleStatus;
+        message = ok ? '${store.roleStatus}. Dashboard opening...' : store.roleStatus;
       });
+    }
+    if (ok && mounted) {
+      openDashboardHomeWithContext(context);
     }
   }
 
   Future<void> _logout() async {
     store.logoutPin();
-    if (mounted) setState(() => message = 'Logged out.');
+    if (mounted) {
+      setState(() => message = 'Logged out.');
+      openLoginScreenWithContext(context);
+    }
   }
 
   @override
@@ -3059,7 +3082,7 @@ class _PinLoginCardState extends State<PinLoginCard> {
             loading ? null : _login,
           ),
         ] else ...[
-          primaryButton('Open Dashboard / Home', openDashboardHome),
+          primaryButton('Open Dashboard / Home', () => openDashboardHomeWithContext(context)),
           const SizedBox(height: 10),
           primaryButton(loading ? 'Please wait...' : 'Refresh Role', loading ? null : () async { await store.refreshRole(); if (mounted) setState(() {}); }),
           const SizedBox(height: 10),
@@ -3166,7 +3189,7 @@ class _SettingsPageState extends State<SettingsPage> {
       if (store.isLoggedIn) ...[
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 18),
-          child: primaryButton('Open Dashboard / Home', openDashboardHome),
+          child: primaryButton('Open Dashboard / Home', () => openDashboardHomeWithContext(context)),
         ),
         const SizedBox(height: 14),
       ],
