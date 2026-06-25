@@ -138,10 +138,11 @@ Map<String, dynamic> seedData() {
 
 /* ====================== store ====================== */
 class AppStore extends ChangeNotifier {
-  Map<String, dynamic> data = {};
-  bool appReady = false;
+  Map<String, dynamic> data = seedData();
+  bool appReady = true;
   static const _key = 'gloan_data_v1';
   static const _groupKey = 'gloan_group_code_v1';
+  static const _deviceKey = 'gloan_install_device_id_v1';
 
   String groupCode = 'SB2026';
   bool cloudReady = false;
@@ -150,6 +151,8 @@ class AppStore extends ChangeNotifier {
 
   String adminPinHash = '';
   String memberPinHash = '';
+  String adminDeviceId = ''; // only this install/device can login as Admin
+  String deviceId = '';
   String loginRole = ''; // '', 'admin', 'member'
   bool roleLoading = false;
   String roleStatus = 'PIN login required';
@@ -159,26 +162,41 @@ class AppStore extends ChangeNotifier {
   bool _applyingRemote = false;
 
   Future<void> load() async {
-    final p = await SharedPreferences.getInstance();
-    groupCode = sanitizeGroupCode(p.getString(_groupKey) ?? 'SB2026');
-    final raw = p.getString(_key);
-    if (raw == null) {
-      data = seedData();
-      _normalize();
-      await p.setString(_key, jsonEncode(data));
-    } else {
-      try {
-        data = jsonDecode(raw) as Map<String, dynamic>;
-        _normalize();
-        await p.setString(_key, jsonEncode(data));
-      } catch (_) {
+    try {
+      final p = await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
+      groupCode = sanitizeGroupCode(p.getString(_groupKey) ?? groupCode);
+      deviceId = p.getString(_deviceKey) ?? '';
+      if (deviceId.isEmpty) {
+        deviceId = 'dev_${DateTime.now().microsecondsSinceEpoch}_${Random().nextInt(999999)}';
+        await p.setString(_deviceKey, deviceId);
+      }
+      final raw = p.getString(_key);
+      if (raw == null) {
         data = seedData();
         _normalize();
         await p.setString(_key, jsonEncode(data));
+      } else {
+        try {
+          data = jsonDecode(raw) as Map<String, dynamic>;
+          _normalize();
+          await p.setString(_key, jsonEncode(data));
+        } catch (_) {
+          data = seedData();
+          _normalize();
+          await p.setString(_key, jsonEncode(data));
+        }
       }
+    } catch (e) {
+      // Never block app opening. If local storage is slow/corrupted, open with safe default data.
+      debugPrint('Local load failed or timed out: $e');
+      data = seedData();
+      _normalize();
+      await _ensureDeviceId();
     }
+
     appReady = true;
     notifyListeners();
+
     // Cloud sync starts in background so the app opens immediately.
     // PIN login still checks the latest cloud role before allowing access.
     unawaited(connectCloud(groupCode, claimAdmin: false));
@@ -202,6 +220,23 @@ class AppStore extends ChangeNotifier {
 
   String _pinHash(String role, String pin) => _simpleHash('$groupCode|$role|${sanitizePin(pin)}|group_loan_pin_v1');
 
+  Future<String> _ensureDeviceId() async {
+    if (deviceId.isNotEmpty) return deviceId;
+    try {
+      final p = await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
+      var id = p.getString(_deviceKey);
+      if (id == null || id.trim().isEmpty) {
+        id = 'dev_${DateTime.now().microsecondsSinceEpoch}_${Random().nextInt(999999)}';
+        await p.setString(_deviceKey, id);
+      }
+      deviceId = id;
+      return deviceId;
+    } catch (_) {
+      deviceId = deviceId.isNotEmpty ? deviceId : 'dev_local_${DateTime.now().microsecondsSinceEpoch}_${Random().nextInt(999999)}';
+      return deviceId;
+    }
+  }
+
   bool get isLoggedIn => loginRole == 'admin' || loginRole == 'member';
   bool get isAdmin => loginRole == 'admin';
   bool get isMember => loginRole == 'member';
@@ -217,8 +252,10 @@ class AppStore extends ChangeNotifier {
   void _readRoleFromDoc(Map<String, dynamic>? doc) {
     final a = doc?['adminPinHash'];
     final m = doc?['memberPinHash'];
+    final ad = doc?['adminDeviceId'];
     adminPinHash = a is String ? a : '';
     memberPinHash = m is String ? m : '';
+    adminDeviceId = ad is String ? ad : '';
     if (isAdmin) {
       roleStatus = 'Logged in as Admin';
     } else if (isMember) {
@@ -226,7 +263,9 @@ class AppStore extends ChangeNotifier {
     } else if (adminPinHash.isEmpty) {
       roleStatus = 'Admin PIN setup pending. First Admin Login will create the Admin PIN.';
     } else if (memberPinHash.isEmpty) {
-      roleStatus = 'Admin PIN ready. Member PIN not set yet.';
+      roleStatus = adminDeviceId.isNotEmpty
+          ? 'Admin PIN ready and Admin phone locked. Member PIN not set yet.'
+          : 'Admin PIN ready. Member PIN not set yet.';
     } else {
       roleStatus = 'Login with Admin PIN or Member PIN.';
     }
@@ -268,21 +307,38 @@ class AppStore extends ChangeNotifier {
       final snap = await _groupRef!.get();
       final doc = snap.data();
       _readRoleFromDoc(doc);
+      final currentDevice = await _ensureDeviceId();
 
       if (role == 'admin') {
         final hash = _pinHash('admin', cleanPin);
         if (adminPinHash.isEmpty) {
           adminPinHash = hash;
           loginRole = 'admin';
+          adminDeviceId = currentDevice;
           await _groupRef!.set({
             'adminPinHash': hash,
+            'adminDeviceId': currentDevice,
             'adminCreatedAt': FieldValue.serverTimestamp(),
             'updatedAt': FieldValue.serverTimestamp(),
           }, SetOptions(merge: true));
           roleStatus = 'Admin PIN created. Logged in as Admin.';
         } else if (adminPinHash == hash) {
+          if (adminDeviceId.isNotEmpty && adminDeviceId != currentDevice) {
+            loginRole = '';
+            roleStatus = 'Admin access is locked to the first Admin phone. Use Member Login on this phone.';
+            roleLoading = false;
+            notifyListeners();
+            return false;
+          }
+          if (adminDeviceId.isEmpty) {
+            adminDeviceId = currentDevice;
+            await _groupRef!.set({
+              'adminDeviceId': currentDevice,
+              'updatedAt': FieldValue.serverTimestamp(),
+            }, SetOptions(merge: true));
+          }
           loginRole = 'admin';
-          roleStatus = 'Logged in as Admin';
+          roleStatus = 'Logged in as Admin on this phone';
         } else {
           loginRole = '';
           roleStatus = 'Wrong Admin PIN.';
@@ -415,6 +471,9 @@ class AppStore extends ChangeNotifier {
     groupCode = nextGroup;
     await _persistLocal();
 
+    if (Firebase.apps.isEmpty) {
+      await initFirebaseSafely();
+    }
     if (Firebase.apps.isEmpty) {
       cloudReady = false;
       cloudStatus = 'Firebase not connected. Data is saved on this phone only.';
@@ -1296,12 +1355,16 @@ bool requireAdminAccess(BuildContext context) {
 
 Future<void> initFirebaseSafely() async {
   try {
-    await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+    if (Firebase.apps.isEmpty) {
+      await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform)
+          .timeout(const Duration(seconds: 6));
+    }
     if (FirebaseAuth.instance.currentUser == null) {
-      await FirebaseAuth.instance.signInAnonymously();
+      await FirebaseAuth.instance.signInAnonymously()
+          .timeout(const Duration(seconds: 8));
     }
   } catch (e) {
-    debugPrint('Firebase init failed: $e');
+    debugPrint('Firebase init failed or timed out: $e');
   }
 }
 
@@ -1309,8 +1372,10 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   store = AppStore();
   runApp(const GroupLoanApp());
-  await initFirebaseSafely();
-  await store.load();
+
+  // Open UI immediately. Local storage and Firebase sync run in the background.
+  unawaited(store.load());
+  unawaited(initFirebaseSafely().then((_) => store.connectCloud(store.groupCode, claimAdmin: false)));
 }
 
 /* ====================== app root ====================== */
@@ -1458,7 +1523,7 @@ class _FirstLoginPageState extends State<FirstLoginPage> {
                   const SizedBox(height: 8),
                   Text(
                     adminMode
-                        ? 'જે Group Codeમાં પહેલીવાર Admin PIN બનાવશો તે Admin access રહેશે. Admin add/edit/delete કરી શકશે.'
+                        ? 'જે phoneથી પહેલીવાર Admin PIN બનાવશો તે એક જ Admin phone રહેશે. Admin add/edit/delete કરી શકશે.'
                         : 'Member same Group Code + Member PINથી data જોઈ શકશે. Edit/delete માટે Admin PIN જરૂરી રહેશે.',
                     style: jk(13.5, color: sage),
                   ),
@@ -2947,9 +3012,9 @@ class _PinLoginCardState extends State<PinLoginCard> {
         const SizedBox(height: 8),
         Text(
           widget.showIntro
-              ? 'OTP વગર login. Admin PIN full access રાખશે. Member PINથી view-only access મળશે.'
+              ? 'OTP વગર login. First Admin phone full access રાખશે. Member PINથી બીજા phone view-only રહેશે.'
               : (widget.adminMode
-                  ? 'Admin PIN નાખો. જો આ Group Codeમાં પહેલીવાર setup છે તો આ PIN Admin PIN તરીકે save થશે.'
+                  ? 'Admin PIN નાખો. પહેલીવાર setupમાં આ phone Admin phone તરીકે lock થશે.'
                   : 'Member PIN નાખો. Member data જોઈ શકશે, પણ edit/delete કરી શકશે નહીં.'),
           style: jk(13.5, color: sage),
         ),
@@ -2961,6 +3026,10 @@ class _PinLoginCardState extends State<PinLoginCard> {
             Text('Current role: ${store.roleLabel}', style: jk(13.5, w: FontWeight.w700, color: isAdmin ? paidC : gold2)),
             const SizedBox(height: 4),
             Text('Group Code: ${store.groupCode}', style: jk(12.5, color: sage)),
+            if (store.adminDeviceId.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(store.isAdmin ? 'Admin phone: This device' : 'Admin phone: Locked', style: jk(12.2, color: store.isAdmin ? paidC : sage)),
+            ],
             const SizedBox(height: 4),
             Text(store.roleStatus, style: jk(12.5, color: isAdmin ? paidC : sage)),
           ]),
