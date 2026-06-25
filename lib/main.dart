@@ -139,6 +139,7 @@ Map<String, dynamic> seedData() {
 /* ====================== store ====================== */
 class AppStore extends ChangeNotifier {
   Map<String, dynamic> data = {};
+  bool appReady = false;
   static const _key = 'gloan_data_v1';
   static const _groupKey = 'gloan_group_code_v1';
 
@@ -176,7 +177,11 @@ class AppStore extends ChangeNotifier {
         await p.setString(_key, jsonEncode(data));
       }
     }
-    await connectCloud(groupCode, claimAdmin: false);
+    appReady = true;
+    notifyListeners();
+    // Cloud sync starts in background so the app opens immediately.
+    // PIN login still checks the latest cloud role before allowing access.
+    unawaited(connectCloud(groupCode, claimAdmin: false));
   }
 
   String sanitizeGroupCode(String value) {
@@ -1271,6 +1276,12 @@ Future<void> sharePdfOnWhatsApp(BuildContext context, {required String title, re
 late AppStore store;
 final ValueNotifier<int> shellTabNotifier = ValueNotifier<int>(0);
 
+void openDashboardHome() {
+  // Force notification even when previous requested tab was already 0.
+  shellTabNotifier.value = -1;
+  Future.microtask(() => shellTabNotifier.value = 0);
+}
+
 bool requireAdminAccess(BuildContext context) {
   if (store.canEditData) return true;
   ScaffoldMessenger.of(context).showSnackBar(
@@ -1296,10 +1307,10 @@ Future<void> initFirebaseSafely() async {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await initFirebaseSafely();
   store = AppStore();
-  await store.load();
   runApp(const GroupLoanApp());
+  await initFirebaseSafely();
+  await store.load();
 }
 
 /* ====================== app root ====================== */
@@ -1320,8 +1331,38 @@ class LoginGate extends StatelessWidget {
   const LoginGate({super.key});
   @override
   Widget build(BuildContext context) {
+    if (!store.appReady) return const StartupScreen();
     if (store.isLoggedIn) return const HomeShell();
     return const FirstLoginPage();
+  }
+}
+
+class StartupScreen extends StatelessWidget {
+  const StartupScreen({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: ink,
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: RadialGradient(center: Alignment(0, -1.15), radius: 1.15, colors: [Color(0x22C9A86A), ink], stops: [0, 0.65]),
+        ),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Seal('SB', size: 74),
+              const SizedBox(height: 18),
+              Text('Group Loan', style: fr(34, w: FontWeight.w600)),
+              const SizedBox(height: 8),
+              Text('Preparing secure login...', style: jk(14, color: sage)),
+              const SizedBox(height: 22),
+              const SizedBox(width: 34, height: 34, child: CircularProgressIndicator(strokeWidth: 2.6, color: gold2)),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -2872,7 +2913,8 @@ class _PinLoginCardState extends State<PinLoginCard> {
     setState(() { loading = true; message = 'Checking PIN...'; });
     final ok = await store.loginWithPin(code: code, role: role, pin: pin.text);
     if (ok) {
-      shellTabNotifier.value = 0;
+      openDashboardHome();
+      WidgetsBinding.instance.addPostFrameCallback((_) => openDashboardHome());
     }
     if (mounted) {
       setState(() {
@@ -2948,7 +2990,7 @@ class _PinLoginCardState extends State<PinLoginCard> {
             loading ? null : _login,
           ),
         ] else ...[
-          primaryButton('Open Dashboard / Home', () { shellTabNotifier.value = 0; }),
+          primaryButton('Open Dashboard / Home', openDashboardHome),
           const SizedBox(height: 10),
           primaryButton(loading ? 'Please wait...' : 'Refresh Role', loading ? null : () async { await store.refreshRole(); if (mounted) setState(() {}); }),
           const SizedBox(height: 10),
@@ -3052,6 +3094,13 @@ class _SettingsPageState extends State<SettingsPage> {
   Widget build(BuildContext context) {
     return ListView(children: [
       const PageHead('More', 'Report, group rules & data'),
+      if (store.isLoggedIn) ...[
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 18),
+          child: primaryButton('Open Dashboard / Home', openDashboardHome),
+        ),
+        const SizedBox(height: 14),
+      ],
       Container(
         margin: const EdgeInsets.symmetric(horizontal: 18),
         padding: const EdgeInsets.all(18),
