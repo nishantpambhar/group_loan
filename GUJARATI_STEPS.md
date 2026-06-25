@@ -1,22 +1,10 @@
-# Gujarati Steps
+# Gujarati Steps - Final Master Build
 
-## Final update શું છે?
+## GitHub update
 
-આ versionમાં app open/login issue fix છે.
+ZIP extract કરીને આ files replace/upload કરો:
 
-- App તરત open થશે.
-- પહેલા Admin / Member PIN Login screen આવશે.
-- PIN નાખ્યા પછી direct Home/Dashboard page open થશે.
-- જો More page પર રહી જાય તો Open Dashboard / Home button દબાવો.
-- Admin full access રાખશે.
-- Member view-only રહેશે.
-- Firebase same Group Codeથી બધા phoneમાં same data sync કરશે.
-- WhatsAppમાં PDF file share થશે, text નહીં.
-- PDF Excel જેવી proper table formatમાં બનશે.
-
-## GitHubમાં update કરવાના files
-
-```
+```text
 lib/main.dart
 pubspec.yaml
 .github/workflows/build.yml
@@ -24,30 +12,47 @@ README.md
 GUJARATI_STEPS.md
 lib/firebase_options.dart
 android/app/google-services.json
+COMPLETE_WORKING_CHECKLIST.md
 ```
 
-Minimum fix માટે:
+Minimum required:
 
-```
+```text
 lib/main.dart
+pubspec.yaml
+lib/firebase_options.dart
+android/app/google-services.json
 ```
 
-## Firebaseમાં જરૂરી
+## Firebase
 
-```
+Firebase Consoleમાં આ બે enabled હોવી જોઈએ:
+
+```text
 Firestore Database ✅
 Authentication → Anonymous ✅
 ```
 
-Phone OTP હવે જરૂરી નથી.
+Phone OTP enable કરવાની જરૂર નથી.
 
-## App use flow
+## App flow
 
+```text
+App open → Admin / Member Login screen
+Admin Login → Group Code SB2026 + Admin PIN
+First Admin login કરનાર phone જ Admin phone તરીકે lock થશે.
+Admin full add/edit/delete કરી શકશે.
+Member Login → Same Group Code + Member PIN
+Member બધા data જોઈ શકશે, પણ edit/delete નહીં કરી શકે.
 ```
-App open
-→ Admin Login
-→ Group Code: SB2026
-→ Admin PIN નાખો
-→ Login
-→ Home/Dashboard automatic open
+
+## WhatsApp PDF
+
+More pageમાં:
+
+```text
+Share VC table PDF on WhatsApp
+Share all data table PDF on WhatsApp
 ```
+
+WhatsAppમાં proper PDF table file share થશે.
