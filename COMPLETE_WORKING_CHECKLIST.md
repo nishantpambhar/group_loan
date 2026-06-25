@@ -1,46 +1,16 @@
-# Group Loan App - Complete Working Checklist
+# Complete Working Checklist
 
-Final features included:
+After installing APK:
 
-1. Admin / Member PIN login on app start.
-2. Firebase cloud sync using Group Code.
-3. Admin full add/edit/delete access.
-4. Member view-only access.
-5. Monthly collection calculation.
-6. Member-wise penalty calculation.
-7. Dashboard calculation:
-   - Cash in hand
-   - Members
-   - Loans out
-   - Interest expected
-   - Interest received / credit
-   - Interest due
-   - Penalty accrued
-8. Loan calculation:
-   - Flat interest = amount × rate × months / 1200
-   - Total payable = principal + interest
-   - EMI = total payable / months
-   - Paid / remaining balance
-   - Loan overdue penalty
-   - Move to paid history without deleting interest/payment data
-9. VC Year Report like Excel sheet:
-   - Name
-   - Jan-Dec collection
-   - Penalty
-   - VC(%)
-   - VC(DR)
-   - VC(CR)
-   - Total
-   - Interest Due
-   - Interest Paid
-   - Percentile
-   - Additional Notes
-10. PDF generation with table format.
-11. WhatsApp PDF file share.
-12. Android GitHub Actions APK/AAB build workflow.
-
-Firebase required:
-- Firestore Database enabled
-- Authentication Anonymous enabled
-
-Phone Auth/OTP is not required.
+1. App opens and shows Admin / Member Login.
+2. Admin Login with Group Code SB2026 and first Admin PIN.
+3. Dashboard opens after login.
+4. Admin can add/edit/delete members, collections, penalties and loans.
+5. Member login works with Member PIN and can view all pages only.
+6. Second phone with same Group Code shows same Firebase data.
+7. Collection totals calculate correctly.
+8. Penalty reflects in Dashboard and VC report.
+9. Loan interest, remaining balance and paid history calculate correctly.
+10. VC Year Report opens as Excel-style table.
+11. Share VC report sends PDF file on WhatsApp.
+12. Share all data sends full table PDF file on WhatsApp.
