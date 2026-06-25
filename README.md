@@ -1,26 +1,21 @@
-# Group Loan App
+# Group Loan App - Final Master Build
 
-Final build with stable PIN login, Firebase sync, Excel-style PDF reports, and WhatsApp PDF sharing.
+Features included:
 
-## Fixed in this version
+- App opens directly to Admin / Member PIN login.
+- First Admin login locks Admin access to that one phone/device.
+- Admin has full add/edit/delete access.
+- Members can login with Member PIN and view all data only.
+- Firebase Firestore cloud sync with same Group Code.
+- All phones using the same Group Code show the same data.
+- Complete calculations for collection, penalty, loans, interest, paid history and dashboard totals.
+- VC yearly report in Excel-style table.
+- Full data PDF with proper tables.
+- WhatsApp share sends PDF files, not plain text.
 
-- App now opens immediately with a luxury loading/login flow.
-- Admin / Member PIN login appears before dashboard access.
-- After successful PIN login, Home/Dashboard opens automatically.
-- More page includes an Open Dashboard / Home button as backup.
-- Admin gets full add/edit/delete access.
-- Member gets view-only access.
-- Firebase Cloud Sync works with the same Group Code.
-- VC report and full data are shared as PDF files on WhatsApp.
-- Excel-style yearly table format is used in PDF reports.
-
-## Firebase required
+Firebase needed:
 
 - Firestore Database enabled
-- Authentication → Anonymous enabled
+- Authentication > Anonymous enabled
 
-Phone OTP is not required in this version.
-
-## GitHub Actions
-
-Upload/replace the files in this ZIP and use Actions to build APK/AAB.
+Phone OTP is not required.
