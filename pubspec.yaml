@@ -1,14 +1,14 @@
 name: group_loan_app
 description: Group savings & loan circle manager (bachat gat).
 publish_to: "none"
-version: 1.0.0+1
+version: 1.0.2+3
 
 environment:
   sdk: ">=3.9.0 <4.0.0"
 
 dependencies:
   flutter:
-    sdk: flutter 
+    sdk: flutter
   shared_preferences: ^2.5.5
   intl: ^0.20.2
   google_fonts: ^8.1.0

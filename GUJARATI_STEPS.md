@@ -1,49 +1,102 @@
-# Group Loan App Gujarati Steps
+# Group Loan App - Gujarati Steps
 
-## Firebase માં જરૂરી setting
+## GitHubમાં update કરવાનું
 
-APK test કરતા પહેલા Firebase Console માં આ 3 વસ્તુ enable કરો:
+ZIP extract કર્યા પછી આ files GitHub repoમાં replace/upload કરો:
 
+```text
+lib/main.dart
+pubspec.yaml
+.github/workflows/build.yml
+README.md
+GUJARATI_STEPS.md
+android/app/google-services.json
+lib/firebase_options.dart
+```
+
+પછી GitHub Actions success થાય એટલે artifact download કરો:
+
+```text
+group-loan-android-release
+```
+
+ZIP extract કરશો તો અંદર મળશે:
+
+```text
+app-release.apk
+app-release.aab
+```
+
+## Firebase Consoleમાં enable રાખવાનું
+
+```text
 1. Firestore Database
 2. Authentication → Anonymous
-3. Authentication → Phone
+```
 
-Phone OTP release APK માં properly ચાલે એ માટે Firebase Console → Project settings → Android app માં SHA-1 અને SHA-256 add કરવી પડશે.
+આ PIN-login versionમાં Phone OTP જરૂરી નથી. Phone Authentication, SMS region policy, SHA-1/SHA-256 અને billingની જરૂર નથી.
 
-## App માં Firebase Sync
+## App Login Flow
 
-1. App open કરો
-2. More tab ખોલો
-3. Firebase Cloud Sync section માં Group Code નાખો
-4. Example: SB2026
-5. Connect / Switch Group દબાવો
-6. Status: Cloud sync active (SB2026) દેખાય તો sync OK
+App open થશે એટલે પહેલા login screen આવશે.
 
-## Phone Login
+```text
+Admin Login / Member Login select કરો
+Group Code: SB2026 નાખો
+Admin PIN નાખો
+પહેલીવાર Admin Login કરશો ત્યારે એ PIN Admin PIN તરીકે save થશે
+Dashboard open થશે
+```
 
-1. More tab ખોલો
-2. Phone Login & Role section માં જાઓ
-3. Mobile number country code સાથે નાખો
-   Example: +919999999999
-4. Send OTP દબાવો
-5. OTP નાખીને Verify OTP & Login દબાવો
+પછી Admin appમાં જઈને Member PIN set કરશે:
 
-## Admin / Member system
+```text
+More → Login PIN Settings → New Member PIN → Save Login PINs
+```
 
-- Group માં સૌથી પહેલા જે phone login કરશે તે Admin બની જશે.
-- Admin બધું add/edit/delete કરી શકશે.
-- બીજો phone same Group Code થી login કરશે તો Member view-only રહેશે.
-- Member data જોઈ શકશે અને PDF share કરી શકશે, પણ edit/delete નહીં કરી શકે.
+પછી બીજા phoneમાં:
+
+```text
+Member Login select કરો
+Group Code: SB2026 નાખો
+Member PIN નાખો
+Login as Member
+```
+
+## Role System
+
+```text
+Admin: add/edit/delete/save બધું કરી શકે
+Member: data જોઈ શકે અને PDF share કરી શકે, edit/delete નહિ કરી શકે
+```
 
 ## WhatsApp PDF Share
 
-More માં:
+Appમાં More tabમાં જાઓ:
 
-- Share VC report PDF on WhatsApp
-- Share all data PDF on WhatsApp
+```text
+Share VC table PDF on WhatsApp
+Share all data table PDF on WhatsApp
+```
 
-Button દબાવ્યા પછી PDF generate થશે અને share sheet ખુલશે. ત્યાં WhatsApp select કરવું.
+હવે WhatsAppમાં plain text નહીં જાય. Proper PDF file share થશે.
 
-## GitHub APK build
+## PDF Format
 
-ZIP extract કરીને GitHub repoમાં files replace કરો. પછી Actions tab માં latest green build open કરો અને `group-loan-android-release` artifact download કરો.
+PDFમાં Excel જેવી table આવશે:
+
+```text
+NAME
+JAN થી DEC
+Penalty
+VC(%)
+VC(DR)
+VC(CR)
+Total
+Interest Due
+Interest Paid
+Percentile
+SUB TOTAL
+Additional Penalty Notes
+Loan table
+```
