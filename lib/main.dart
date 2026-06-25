@@ -147,9 +147,11 @@ class AppStore extends ChangeNotifier {
   bool cloudSaving = false;
   String cloudStatus = 'Local storage only';
 
-  String adminPhone = '';
+  String adminPinHash = '';
+  String memberPinHash = '';
+  String loginRole = ''; // '', 'admin', 'member'
   bool roleLoading = false;
-  String roleStatus = 'Phone login optional';
+  String roleStatus = 'PIN login required';
 
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _cloudSub;
   DocumentReference<Map<String, dynamic>>? _groupRef;
@@ -174,7 +176,7 @@ class AppStore extends ChangeNotifier {
         await p.setString(_key, jsonEncode(data));
       }
     }
-    await connectCloud(groupCode);
+    await connectCloud(groupCode, claimAdmin: false);
   }
 
   String sanitizeGroupCode(String value) {
@@ -182,31 +184,46 @@ class AppStore extends ChangeNotifier {
     return cleaned.isEmpty ? 'SB2026' : cleaned;
   }
 
-  String normalizePhone(String value) {
-    var v = value.trim().replaceAll(RegExp(r'[^0-9+]'), '');
-    if (v.startsWith('+')) return v;
-    if (v.length == 10) return '+91$v';
-    if (v.startsWith('91') && v.length == 12) return '+$v';
-    return v;
+  String sanitizePin(String value) => value.trim().replaceAll(RegExp(r'[^0-9]'), '');
+
+  String _simpleHash(String input) {
+    var h = 0x811c9dc5;
+    for (final b in utf8.encode(input)) {
+      h ^= b;
+      h = (h * 0x01000193) & 0xffffffff;
+    }
+    return h.toRadixString(16).padLeft(8, '0');
   }
 
-  String get currentPhone => normalizePhone(FirebaseAuth.instance.currentUser?.phoneNumber ?? '');
-  bool get isPhoneLoggedIn => currentPhone.isNotEmpty;
-  bool get isAdmin => adminPhone.isNotEmpty && normalizePhone(adminPhone) == currentPhone;
-  bool get canEditData => adminPhone.isEmpty || isAdmin;
+  String _pinHash(String role, String pin) => _simpleHash('$groupCode|$role|${sanitizePin(pin)}|group_loan_pin_v1');
+
+  bool get isLoggedIn => loginRole == 'admin' || loginRole == 'member';
+  bool get isAdmin => loginRole == 'admin';
+  bool get isMember => loginRole == 'member';
+  bool get canEditData => isAdmin;
+  bool get hasAdminPin => adminPinHash.isNotEmpty;
+  bool get hasMemberPin => memberPinHash.isNotEmpty;
   String get roleLabel {
-    if (!isPhoneLoggedIn) return adminPhone.isEmpty ? 'Guest / setup pending' : 'Guest view-only';
-    if (adminPhone.isEmpty) return 'Admin setup pending';
-    return isAdmin ? 'Admin' : 'Member view-only';
+    if (isAdmin) return 'Admin';
+    if (isMember) return 'Member view-only';
+    return hasAdminPin ? 'Logged out / login required' : 'Admin setup pending';
   }
 
   void _readRoleFromDoc(Map<String, dynamic>? doc) {
-    final value = doc?['adminPhone'];
-    adminPhone = value is String ? normalizePhone(value) : '';
-    if (adminPhone.isEmpty) {
-      roleStatus = isPhoneLoggedIn ? 'No admin set yet. Login phone can become admin.' : 'Phone login required for admin setup.';
+    final a = doc?['adminPinHash'];
+    final m = doc?['memberPinHash'];
+    adminPinHash = a is String ? a : '';
+    memberPinHash = m is String ? m : '';
+    if (isAdmin) {
+      roleStatus = 'Logged in as Admin';
+    } else if (isMember) {
+      roleStatus = 'Logged in as Member / view-only';
+    } else if (adminPinHash.isEmpty) {
+      roleStatus = 'Admin PIN setup pending. First Admin Login will create the Admin PIN.';
+    } else if (memberPinHash.isEmpty) {
+      roleStatus = 'Admin PIN ready. Member PIN not set yet.';
     } else {
-      roleStatus = isAdmin ? 'Logged in as Admin' : 'Logged in as Member / view-only';
+      roleStatus = 'Login with Admin PIN or Member PIN.';
     }
   }
 
@@ -230,40 +247,107 @@ class AppStore extends ChangeNotifier {
     }
   }
 
-  Future<void> ensureAdminForLoggedPhone() async {
-    if (_groupRef == null || !isPhoneLoggedIn) return;
-    final phone = currentPhone;
+  Future<bool> loginWithPin({required String code, required String role, required String pin}) async {
+    final cleanPin = sanitizePin(pin);
+    if (cleanPin.length < 4) {
+      roleStatus = 'PIN must be at least 4 digits.';
+      notifyListeners();
+      return false;
+    }
+    roleLoading = true;
+    roleStatus = 'Checking PIN...';
+    notifyListeners();
     try {
+      await connectCloud(code, claimAdmin: false);
+      if (_groupRef == null) throw Exception('Cloud group not connected');
       final snap = await _groupRef!.get();
-      final existing = snap.data()?['adminPhone'];
-      if (existing is String && existing.trim().isNotEmpty) {
-        adminPhone = normalizePhone(existing);
+      final doc = snap.data();
+      _readRoleFromDoc(doc);
+
+      if (role == 'admin') {
+        final hash = _pinHash('admin', cleanPin);
+        if (adminPinHash.isEmpty) {
+          adminPinHash = hash;
+          loginRole = 'admin';
+          await _groupRef!.set({
+            'adminPinHash': hash,
+            'adminCreatedAt': FieldValue.serverTimestamp(),
+            'updatedAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
+          roleStatus = 'Admin PIN created. Logged in as Admin.';
+        } else if (adminPinHash == hash) {
+          loginRole = 'admin';
+          roleStatus = 'Logged in as Admin';
+        } else {
+          loginRole = '';
+          roleStatus = 'Wrong Admin PIN.';
+          roleLoading = false;
+          notifyListeners();
+          return false;
+        }
       } else {
-        adminPhone = phone;
-        await _groupRef!.set({
-          'adminPhone': phone,
-          'adminCreatedAt': FieldValue.serverTimestamp(),
-          'adminUid': FirebaseAuth.instance.currentUser?.uid ?? '',
-        }, SetOptions(merge: true));
+        final hash = _pinHash('member', cleanPin);
+        if (memberPinHash.isEmpty) {
+          loginRole = '';
+          roleStatus = 'Member PIN not set. Admin must set Member PIN from More.';
+          roleLoading = false;
+          notifyListeners();
+          return false;
+        } else if (memberPinHash == hash) {
+          loginRole = 'member';
+          roleStatus = 'Logged in as Member / view-only';
+        } else {
+          loginRole = '';
+          roleStatus = 'Wrong Member PIN.';
+          roleLoading = false;
+          notifyListeners();
+          return false;
+        }
       }
-      roleStatus = isAdmin ? 'Logged in as Admin' : 'Logged in as Member / view-only';
+      roleLoading = false;
       notifyListeners();
+      return true;
     } catch (e) {
-      roleStatus = 'Admin role setup error: $e';
+      loginRole = '';
+      roleLoading = false;
+      roleStatus = 'PIN login error: $e';
       notifyListeners();
+      return false;
     }
   }
 
-  Future<void> logoutPhoneKeepCloud() async {
-    try {
-      await FirebaseAuth.instance.signOut();
-      await FirebaseAuth.instance.signInAnonymously();
-      roleStatus = 'Logged out. Guest view-only if admin is set.';
-      await connectCloud(groupCode);
-    } catch (e) {
-      roleStatus = 'Logout failed: $e';
+  Future<void> updateLoginPins({String? adminPin, String? memberPin}) async {
+    if (!isAdmin) {
+      roleStatus = 'Only Admin can change login PINs.';
       notifyListeners();
+      return;
     }
+    if (_groupRef == null) {
+      await connectCloud(groupCode, claimAdmin: false);
+    }
+    if (_groupRef == null) return;
+    final updates = <String, dynamic>{'updatedAt': FieldValue.serverTimestamp()};
+    final a = sanitizePin(adminPin ?? '');
+    final m = sanitizePin(memberPin ?? '');
+    if (a.isNotEmpty) {
+      if (a.length < 4) throw Exception('Admin PIN must be at least 4 digits');
+      updates['adminPinHash'] = _pinHash('admin', a);
+      adminPinHash = updates['adminPinHash'] as String;
+    }
+    if (m.isNotEmpty) {
+      if (m.length < 4) throw Exception('Member PIN must be at least 4 digits');
+      updates['memberPinHash'] = _pinHash('member', m);
+      memberPinHash = updates['memberPinHash'] as String;
+    }
+    await _groupRef!.set(updates, SetOptions(merge: true));
+    roleStatus = 'Login PIN settings saved.';
+    notifyListeners();
+  }
+
+  void logoutPin() {
+    loginRole = '';
+    roleStatus = 'Logged out. PIN login required.';
+    notifyListeners();
   }
 
   void _normalize() {
@@ -317,8 +401,13 @@ class AppStore extends ChangeNotifier {
     }
   }
 
-  Future<void> connectCloud(String code) async {
-    groupCode = sanitizeGroupCode(code);
+  Future<void> connectCloud(String code, {bool claimAdmin = false}) async {
+    final nextGroup = sanitizeGroupCode(code);
+    if (nextGroup != groupCode) {
+      loginRole = '';
+      roleStatus = 'Group switched. PIN login required.';
+    }
+    groupCode = nextGroup;
     await _persistLocal();
 
     if (Firebase.apps.isEmpty) {
@@ -357,7 +446,6 @@ class AppStore extends ChangeNotifier {
         }, SetOptions(merge: true));
       }
 
-      await ensureAdminForLoggedPhone();
 
       cloudReady = true;
       cloudStatus = 'Cloud sync active ($groupCode)';
@@ -694,6 +782,389 @@ String _safePdfText(String value) {
       .replaceAll(RegExp(r'[^\x09\x0A\x0D\x20-\x7E]'), '');
 }
 
+String _pdfMoney(num n) => _safePdfText(_plainMoney(n));
+
+String _pdfNum(dynamic v) {
+  final n = _toNum(v);
+  if (n == 0) return '';
+  return NumberFormat.decimalPattern('en_IN').format(n.round());
+}
+
+String _pdfPercent(dynamic v) {
+  final n = _toNum(v);
+  if (n == 0) return '';
+  return n.toStringAsFixed(n % 1 == 0 ? 0 : 2);
+}
+
+pw.TextStyle _pdfTableText({bool header = false, bool total = false, PdfColor? color, double size = 7}) => pw.TextStyle(
+      fontSize: size,
+      fontWeight: header || total ? pw.FontWeight.bold : pw.FontWeight.normal,
+      color: color ?? PdfColor.fromHex('#091A15'),
+    );
+
+pw.Widget _pdfCell(
+  String value, {
+  bool header = false,
+  bool total = false,
+  pw.Alignment align = pw.Alignment.center,
+  double fontSize = 7,
+  PdfColor? color,
+}) {
+  return pw.Container(
+    alignment: align,
+    padding: const pw.EdgeInsets.symmetric(horizontal: 3, vertical: 4),
+    child: pw.Text(
+      _safePdfText(value),
+      textAlign: align == pw.Alignment.centerRight ? pw.TextAlign.right : pw.TextAlign.center,
+      style: _pdfTableText(header: header, total: total, color: color, size: fontSize),
+      maxLines: 2,
+    ),
+  );
+}
+
+pw.Widget _pdfLeftCell(String value, {bool header = false, bool total = false, double fontSize = 7}) => _pdfCell(
+      value,
+      header: header,
+      total: total,
+      fontSize: fontSize,
+      align: pw.Alignment.centerLeft,
+    );
+
+pw.TableRow _pdfTableRow(
+  List<String> values, {
+  bool header = false,
+  bool total = false,
+  Set<int> rightCols = const {},
+  Set<int> leftCols = const {0},
+  double fontSize = 7,
+}) {
+  return pw.TableRow(
+    decoration: pw.BoxDecoration(color: header ? PdfColor.fromHex('#F3EEE3') : (total ? PdfColor.fromHex('#EFE7D7') : PdfColors.white)),
+    children: [
+      for (var i = 0; i < values.length; i++)
+        _pdfCell(
+          values[i],
+          header: header,
+          total: total,
+          fontSize: fontSize,
+          align: leftCols.contains(i) ? pw.Alignment.centerLeft : (rightCols.contains(i) ? pw.Alignment.centerRight : pw.Alignment.center),
+          color: (values[i].startsWith('-') || values[i].contains('Pending')) ? PdfColors.red700 : null,
+        ),
+    ],
+  );
+}
+
+List<String> vcPdfHeaders() => [
+      'NAME', 'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC',
+      'Penalty', 'VC(%)', 'VC(DR)', 'VC(CR)', 'Total', 'Interest Due', 'Paid', 'Percentile',
+    ];
+
+List<List<String>> vcPdfRows(int year) {
+  final monthly = _toNum(store.settings['monthly']);
+  final rows = <List<String>>[];
+  final monthTotals = List<num>.filled(12, 0);
+  num penaltyTotal = 0;
+  num vcDrTotal = 0;
+  num vcCrTotal = 0;
+  num totalTotal = 0;
+  num interestDueTotal = 0;
+  num interestPaidTotal = 0;
+
+  for (final item in store.members) {
+    final member = item as Map;
+    final id = member['id'] as String;
+    final values = <String>['${member['name']}'];
+    num contribution = 0;
+    for (var i = 1; i <= 12; i++) {
+      final paid = isContributionPaid(((store.contributions[ym(year, i)] as Map?) ?? {})[id]);
+      final val = paid ? monthly : 0;
+      if (paid) contribution += monthly;
+      monthTotals[i - 1] += val;
+      values.add(paid ? _pdfNum(monthly) : '-');
+    }
+    final penalty = yearPenaltyTotal(year, id);
+    final vcPercent = yearlyAdjustmentValue(year, id, 'vcPercent');
+    final vcDr = yearlyAdjustmentValue(year, id, 'vcDr');
+    final vcCr = yearlyAdjustmentValue(year, id, 'vcCr');
+    final interestDue = yearlyAdjustmentValue(year, id, 'interestDue');
+    final interestPaid = yearlyAdjustmentValue(year, id, 'interestPaid');
+    final percentile = yearlyAdjustmentValue(year, id, 'percentile');
+    final total = contribution + penalty + vcCr - vcDr;
+
+    penaltyTotal += penalty;
+    vcDrTotal += vcDr;
+    vcCrTotal += vcCr;
+    totalTotal += total;
+    interestDueTotal += interestDue;
+    interestPaidTotal += interestPaid;
+
+    values.addAll([
+      _pdfNum(penalty), _pdfPercent(vcPercent), _pdfNum(vcDr), _pdfNum(vcCr), _pdfNum(total),
+      _pdfNum(interestDue), _pdfNum(interestPaid), _pdfPercent(percentile),
+    ]);
+    rows.add(values);
+  }
+
+  rows.add([
+    'SUB TOTAL',
+    ...monthTotals.map(_pdfNum),
+    _pdfNum(penaltyTotal), '', _pdfNum(vcDrTotal), _pdfNum(vcCrTotal), _pdfNum(totalTotal),
+    _pdfNum(interestDueTotal), _pdfNum(interestPaidTotal), '',
+  ]);
+  return rows;
+}
+
+pw.Widget _vcTablePdf(int year) {
+  final headers = vcPdfHeaders();
+  final rows = vcPdfRows(year);
+  final rightCols = <int>{for (var i = 1; i < headers.length; i++) i};
+  final widths = <int, pw.TableColumnWidth>{
+    0: const pw.FlexColumnWidth(2.8),
+    for (var i = 1; i <= 12; i++) i: const pw.FlexColumnWidth(0.85),
+    13: const pw.FlexColumnWidth(0.95),
+    14: const pw.FlexColumnWidth(0.9),
+    15: const pw.FlexColumnWidth(1.0),
+    16: const pw.FlexColumnWidth(1.0),
+    17: const pw.FlexColumnWidth(1.05),
+    18: const pw.FlexColumnWidth(1.15),
+    19: const pw.FlexColumnWidth(1.0),
+    20: const pw.FlexColumnWidth(1.0),
+  };
+  return pw.Table(
+    border: pw.TableBorder.all(color: PdfColors.grey700, width: 0.45),
+    columnWidths: widths,
+    children: [
+      _pdfTableRow(headers, header: true, rightCols: rightCols, fontSize: 6.5),
+      for (var i = 0; i < rows.length; i++)
+        _pdfTableRow(rows[i], total: i == rows.length - 1, rightCols: rightCols, fontSize: 6.5),
+    ],
+  );
+}
+
+pw.Widget _vcNotesTablePdf(int year) {
+  final rows = <pw.TableRow>[
+    _pdfTableRow(['ADDITIONAL NOTES', 'PENALTY NOTES'], header: true, leftCols: {0, 1}, fontSize: 8),
+  ];
+  for (final item in store.members) {
+    final member = item as Map;
+    rows.add(_pdfTableRow(['${member['name']}', penaltyNotes(year, member['id'] as String)], leftCols: {0, 1}, fontSize: 8));
+  }
+  return pw.Table(
+    border: pw.TableBorder.all(color: PdfColors.grey700, width: 0.4),
+    columnWidths: const {0: pw.FlexColumnWidth(1.3), 1: pw.FlexColumnWidth(4)},
+    children: rows,
+  );
+}
+
+pw.Widget _pdfSectionTitle(String title) => pw.Container(
+      margin: const pw.EdgeInsets.only(top: 12, bottom: 6),
+      padding: const pw.EdgeInsets.symmetric(vertical: 5, horizontal: 8),
+      decoration: pw.BoxDecoration(color: PdfColor.fromHex('#103127'), borderRadius: pw.BorderRadius.circular(5)),
+      child: pw.Text(_safePdfText(title), style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold, color: PdfColors.white)),
+    );
+
+pw.Widget _summaryTablePdf() {
+  final totals = dashboardTotals();
+  final rows = [
+    ['Cash in hand', _pdfMoney(_toNum(totals['cash']))],
+    ['Members', '${store.members.length}'],
+    ['Loans out', _pdfMoney(_toNum(totals['loansOut']))],
+    ['Interest expected', _pdfMoney(_toNum(totals['interestExpected']))],
+    ['Interest received / credit', _pdfMoney(_toNum(totals['interestReceived']))],
+    ['Interest due', _pdfMoney(_toNum(totals['interestDue']))],
+    ['Penalty accrued', _pdfMoney(_toNum(totals['penalty']))],
+  ];
+  return pw.Table(
+    border: pw.TableBorder.all(color: PdfColors.grey700, width: 0.45),
+    columnWidths: const {0: pw.FlexColumnWidth(2.2), 1: pw.FlexColumnWidth(1.2)},
+    children: [
+      _pdfTableRow(['Metric', 'Value'], header: true, leftCols: {0}, rightCols: {1}, fontSize: 9),
+      for (final row in rows) _pdfTableRow(row, leftCols: {0}, rightCols: {1}, fontSize: 9),
+    ],
+  );
+}
+
+pw.Widget _currentMonthTablePdf(String month) {
+  final monthly = _toNum(store.settings['monthly']);
+  final monthC = (store.contributions[month] as Map?) ?? {};
+  final rows = <pw.TableRow>[
+    _pdfTableRow(['Name', 'Monthly', 'Penalty', 'Status', 'Total'], header: true, leftCols: {0}, rightCols: {1, 2, 4}, fontSize: 8),
+  ];
+  num collected = 0;
+  num pending = 0;
+  for (final mem in store.members) {
+    final m = mem as Map;
+    final id = m['id'] as String;
+    final paid = isContributionPaid(monthC[id]);
+    final penalty = monthlyPenalty(month, id);
+    final amount = monthly + penalty;
+    if (paid) collected += amount; else pending += amount;
+    rows.add(_pdfTableRow(['${m['name']}', _pdfMoney(monthly), _pdfMoney(penalty), _paidText(paid), _pdfMoney(amount)], leftCols: {0}, rightCols: {1, 2, 4}, fontSize: 8));
+  }
+  rows.add(_pdfTableRow(['Collected', '', '', '', _pdfMoney(collected)], total: true, leftCols: {0}, rightCols: {4}, fontSize: 8));
+  rows.add(_pdfTableRow(['Pending', '', '', '', _pdfMoney(pending)], total: true, leftCols: {0}, rightCols: {4}, fontSize: 8));
+  rows.add(_pdfTableRow(['Total', '', '', '', _pdfMoney(collected + pending)], total: true, leftCols: {0}, rightCols: {4}, fontSize: 8));
+  return pw.Table(
+    border: pw.TableBorder.all(color: PdfColors.grey700, width: 0.45),
+    columnWidths: const {0: pw.FlexColumnWidth(2.2), 1: pw.FlexColumnWidth(1), 2: pw.FlexColumnWidth(1), 3: pw.FlexColumnWidth(1), 4: pw.FlexColumnWidth(1)},
+    children: rows,
+  );
+}
+
+pw.Widget _loansTablePdf() {
+  final rows = <pw.TableRow>[
+    _pdfTableRow(['Name', 'Amount', 'Debit Date', 'Credit Date', 'Interest', 'Paid', 'Remaining', 'Status'], header: true, leftCols: {0}, rightCols: {1, 4, 5, 6}, fontSize: 7.5),
+  ];
+  if (store.loans.isEmpty) {
+    rows.add(_pdfTableRow(['No loans yet', '', '', '', '', '', '', ''], leftCols: {0}, fontSize: 8));
+  } else {
+    for (final item in store.loans) {
+      final loan = item as Map;
+      final member = store.members.firstWhere((x) => x['id'] == loan['memberId'], orElse: () => {'name': '-'}) as Map;
+      final c = computeLoan(loan, store.settings);
+      final payments = (loan['payments'] as List?) ?? const [];
+      final lastPayment = payments.isNotEmpty ? (payments.last as Map)['date'] : '';
+      rows.add(_pdfTableRow([
+        '${member['name']}',
+        _pdfMoney(_toNum(c['principal'])),
+        '${loan['date'] ?? ''}',
+        '$lastPayment',
+        _pdfMoney(_toNum(c['interest'])),
+        _pdfMoney(_toNum(c['paid'])),
+        _pdfMoney(_toNum(c['remaining'])),
+        isLoanArchived(loan) ? 'Paid history' : '${c['status']}',
+      ], leftCols: {0}, rightCols: {1, 4, 5, 6}, fontSize: 7.5));
+    }
+  }
+  return pw.Table(
+    border: pw.TableBorder.all(color: PdfColors.grey700, width: 0.45),
+    columnWidths: const {
+      0: pw.FlexColumnWidth(2), 1: pw.FlexColumnWidth(1), 2: pw.FlexColumnWidth(1.1), 3: pw.FlexColumnWidth(1.1),
+      4: pw.FlexColumnWidth(1), 5: pw.FlexColumnWidth(1), 6: pw.FlexColumnWidth(1), 7: pw.FlexColumnWidth(1.1),
+    },
+    children: rows,
+  );
+}
+
+pw.Widget _pdfHeaderBlock(String title) {
+  final generatedAt = DateFormat('dd MMM yyyy, hh:mm a').format(DateTime.now());
+  return pw.Container(
+    padding: const pw.EdgeInsets.only(bottom: 8),
+    decoration: const pw.BoxDecoration(border: pw.Border(bottom: pw.BorderSide(width: 0.6, color: PdfColors.grey600))),
+    child: pw.Row(
+      mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+      crossAxisAlignment: pw.CrossAxisAlignment.end,
+      children: [
+        pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+          pw.Text(_safePdfText('${store.settings['groupName']}'), style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold, color: PdfColor.fromHex('#103127'))),
+          pw.SizedBox(height: 2),
+          pw.Text(_safePdfText(title), style: pw.TextStyle(fontSize: 10, color: PdfColor.fromHex('#C9A86A'), fontWeight: pw.FontWeight.bold)),
+        ]),
+        pw.Text('Generated: $generatedAt', style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700)),
+      ],
+    ),
+  );
+}
+
+Future<File> createVcXlsxStylePdfFile(int year) async {
+  final pdf = pw.Document();
+  pdf.addPage(
+    pw.MultiPage(
+      pageFormat: PdfPageFormat.a4.landscape,
+      margin: const pw.EdgeInsets.all(18),
+      footer: (context) => pw.Align(
+        alignment: pw.Alignment.centerRight,
+        child: pw.Text('Page ${context.pageNumber} of ${context.pagesCount}', style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey600)),
+      ),
+      build: (context) => [
+        _pdfHeaderBlock('VC [$year] YEAR REPORT'),
+        pw.SizedBox(height: 10),
+        _vcTablePdf(year),
+        pw.SizedBox(height: 12),
+        _vcNotesTablePdf(year),
+      ],
+    ),
+  );
+  final dir = await getTemporaryDirectory();
+  final stamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+  final file = File('${dir.path}/VC_${year}_XLSX_Report_$stamp.pdf');
+  await file.writeAsBytes(await pdf.save(), flush: true);
+  return file;
+}
+
+Future<File> createFullXlsxStylePdfFile({int? year}) async {
+  final y = year ?? DateTime.now().year;
+  final tm = monthKeyOf(DateTime.now());
+  final pdf = pw.Document();
+  pdf.addPage(
+    pw.MultiPage(
+      pageFormat: PdfPageFormat.a4,
+      margin: const pw.EdgeInsets.all(24),
+      footer: (context) => pw.Align(
+        alignment: pw.Alignment.centerRight,
+        child: pw.Text('Page ${context.pageNumber} of ${context.pagesCount}', style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey600)),
+      ),
+      build: (context) => [
+        _pdfHeaderBlock('FULL GROUP LOAN REPORT'),
+        _pdfSectionTitle('SUMMARY'),
+        _summaryTablePdf(),
+        _pdfSectionTitle('COLLECTION - ${monthLabel(tm)}'),
+        _currentMonthTablePdf(tm),
+        _pdfSectionTitle('LOANS / PAID HISTORY'),
+        _loansTablePdf(),
+      ],
+    ),
+  );
+  pdf.addPage(
+    pw.MultiPage(
+      pageFormat: PdfPageFormat.a4.landscape,
+      margin: const pw.EdgeInsets.all(18),
+      footer: (context) => pw.Align(
+        alignment: pw.Alignment.centerRight,
+        child: pw.Text('Page ${context.pageNumber} of ${context.pagesCount}', style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey600)),
+      ),
+      build: (context) => [
+        _pdfHeaderBlock('VC [$y] YEAR REPORT'),
+        pw.SizedBox(height: 10),
+        _vcTablePdf(y),
+        pw.SizedBox(height: 12),
+        _vcNotesTablePdf(y),
+      ],
+    ),
+  );
+  final dir = await getTemporaryDirectory();
+  final stamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+  final file = File('${dir.path}/Full_Group_Loan_XLSX_Report_$stamp.pdf');
+  await file.writeAsBytes(await pdf.save(), flush: true);
+  return file;
+}
+
+Future<void> shareFileOnWhatsApp(BuildContext context, Future<File> Function() createFile, {required String subject}) async {
+  try {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Proper table PDF તૈયાર થઈ રહી છે...', style: jk(14, color: ink)), backgroundColor: gold2, behavior: SnackBarBehavior.floating),
+      );
+    }
+    final file = await createFile();
+    await Share.shareXFiles([XFile(file.path)], subject: subject);
+  } catch (e) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('PDF share failed: $e', style: jk(13, color: ink)), backgroundColor: clay, behavior: SnackBarBehavior.floating),
+      );
+    }
+  }
+}
+
+Future<void> shareVcXlsxPdfOnWhatsApp(BuildContext context, int year) async {
+  await shareFileOnWhatsApp(context, () => createVcXlsxStylePdfFile(year), subject: 'VC [$year] Report PDF');
+}
+
+Future<void> shareFullXlsxPdfOnWhatsApp(BuildContext context, {int? year}) async {
+  await shareFileOnWhatsApp(context, () => createFullXlsxStylePdfFile(year: year), subject: 'Full Group Loan Report PDF');
+}
+
 String _safePdfFileName(String value) {
   final base = value
       .toLowerCase()
@@ -803,7 +1274,7 @@ bool requireAdminAccess(BuildContext context) {
   if (store.canEditData) return true;
   ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
-      content: Text('Only Admin can add/edit/delete data. Please login with admin phone number.', style: jk(14, color: ink)),
+      content: Text('Only Admin can add/edit/delete data. Please login with Admin PIN.', style: jk(14, color: ink)),
       backgroundColor: gold2,
       behavior: SnackBarBehavior.floating,
     ),
@@ -839,7 +1310,131 @@ class GroupLoanApp extends StatelessWidget {
       title: 'Group Loan',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(scaffoldBackgroundColor: ink, useMaterial3: true),
-      home: AnimatedBuilder(animation: store, builder: (_, __) => const HomeShell()),
+      home: AnimatedBuilder(animation: store, builder: (_, __) => const LoginGate()),
+    );
+  }
+}
+
+class LoginGate extends StatelessWidget {
+  const LoginGate({super.key});
+  @override
+  Widget build(BuildContext context) {
+    if (store.isLoggedIn) return const HomeShell();
+    return const FirstLoginPage();
+  }
+}
+
+class FirstLoginPage extends StatefulWidget {
+  const FirstLoginPage({super.key});
+  @override
+  State<FirstLoginPage> createState() => _FirstLoginPageState();
+}
+
+class _FirstLoginPageState extends State<FirstLoginPage> {
+  late TextEditingController groupCode;
+  bool adminMode = true;
+  bool loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    groupCode = TextEditingController(text: store.groupCode);
+  }
+
+  @override
+  void dispose() {
+    groupCode.dispose();
+    super.dispose();
+  }
+
+  Future<void> _useGroupCode() async {
+    setState(() => loading = true);
+    await store.connectCloud(groupCode.text, claimAdmin: false);
+    if (mounted) {
+      groupCode.text = store.groupCode;
+      setState(() => loading = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(store.cloudStatus, style: jk(14, color: ink)), backgroundColor: store.cloudReady ? gold2 : clay, behavior: SnackBarBehavior.floating),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: ink,
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: RadialGradient(center: Alignment(0, -1.15), radius: 1.15, colors: [Color(0x22C9A86A), ink], stops: [0, 0.65]),
+        ),
+        child: SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(18, 24, 18, 24),
+            children: [
+              Row(children: [
+                const Seal('SB', size: 54),
+                const SizedBox(width: 14),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('GROUP LOAN', style: jk(12, w: FontWeight.w700, color: gold2, ls: 4)),
+                  const SizedBox(height: 4),
+                  Text('Secure Login', style: fr(34, w: FontWeight.w600)),
+                ])),
+              ]),
+              const SizedBox(height: 16),
+              Text('App open થાય એટલે પહેલા Admin / Member PIN login થશે. Login પછી dashboard, collection, loans અને reports open થશે.', style: jk(14, color: sage)),
+              const SizedBox(height: 20),
+              Container(
+                padding: const EdgeInsets.all(5),
+                decoration: BoxDecoration(color: forest2, border: Border.all(color: line), borderRadius: BorderRadius.circular(18)),
+                child: Row(children: [
+                  Expanded(child: GestureDetector(
+                    onTap: () => setState(() => adminMode = true),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      decoration: BoxDecoration(color: adminMode ? gold : Colors.transparent, borderRadius: BorderRadius.circular(14)),
+                      alignment: Alignment.center,
+                      child: Text('Admin Login', style: jk(14, w: FontWeight.w800, color: adminMode ? ink : gold2)),
+                    ),
+                  )),
+                  Expanded(child: GestureDetector(
+                    onTap: () => setState(() => adminMode = false),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      decoration: BoxDecoration(color: !adminMode ? gold : Colors.transparent, borderRadius: BorderRadius.circular(14)),
+                      alignment: Alignment.center,
+                      child: Text('Member Login', style: jk(14, w: FontWeight.w800, color: !adminMode ? ink : gold2)),
+                    ),
+                  )),
+                ]),
+              ),
+              const SizedBox(height: 14),
+              Container(
+                padding: const EdgeInsets.all(18),
+                decoration: cardDeco(),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(adminMode ? 'Admin access' : 'Member access', style: fr(20)),
+                  const SizedBox(height: 8),
+                  Text(
+                    adminMode
+                        ? 'જે Group Codeમાં પહેલીવાર Admin PIN બનાવશો તે Admin access રહેશે. Admin add/edit/delete કરી શકશે.'
+                        : 'Member same Group Code + Member PINથી data જોઈ શકશે. Edit/delete માટે Admin PIN જરૂરી રહેશે.',
+                    style: jk(13.5, color: sage),
+                  ),
+                  const SizedBox(height: 12),
+                  fieldLabel('Group Code'),
+                  TextField(controller: groupCode, textCapitalization: TextCapitalization.characters, style: jk(16), decoration: fieldDeco('SB2026')),
+                  const SizedBox(height: 10),
+                  Text(store.cloudStatus, style: jk(12.5, color: store.cloudReady ? paidC : clay)),
+                  const SizedBox(height: 12),
+                  primaryButton(loading ? 'Connecting...' : 'Use this Group Code', loading ? null : _useGroupCode),
+                ]),
+              ),
+              const SizedBox(height: 14),
+              PinLoginCard(showIntro: false, adminMode: adminMode, groupCodeController: groupCode, key: ValueKey(adminMode)),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -2227,111 +2822,70 @@ class _YearlyFieldsFormState extends State<YearlyFieldsForm> {
 }
 
 
-/* ====================== Phone Login / Roles ====================== */
-class PhoneLoginCard extends StatefulWidget {
-  const PhoneLoginCard({super.key});
+/* ====================== PIN Login / Roles ====================== */
+class PinLoginCard extends StatefulWidget {
+  final bool showIntro;
+  final bool adminMode;
+  final TextEditingController? groupCodeController;
+  const PinLoginCard({this.showIntro = true, this.adminMode = true, this.groupCodeController, super.key});
   @override
-  State<PhoneLoginCard> createState() => _PhoneLoginCardState();
+  State<PinLoginCard> createState() => _PinLoginCardState();
 }
 
-class _PhoneLoginCardState extends State<PhoneLoginCard> {
-  late TextEditingController phone;
-  final otp = TextEditingController();
-  String verificationId = '';
-  bool codeSent = false;
+class _PinLoginCardState extends State<PinLoginCard> {
+  final pin = TextEditingController();
   bool loading = false;
   String message = '';
-
-  @override
-  void initState() {
-    super.initState();
-    phone = TextEditingController(text: store.currentPhone.isNotEmpty ? store.currentPhone : '+91');
-  }
+  bool obscure = true;
 
   @override
   void dispose() {
-    phone.dispose();
-    otp.dispose();
+    pin.dispose();
     super.dispose();
   }
 
-  Future<void> _sendOtp() async {
-    final normalized = store.normalizePhone(phone.text);
-    if (!normalized.startsWith('+') || normalized.length < 11) {
-      setState(() => message = 'Please enter valid phone number with country code, e.g. +919999999999');
-      return;
-    }
-    setState(() { loading = true; message = 'Sending OTP...'; });
-    try {
-      await FirebaseAuth.instance.verifyPhoneNumber(
-        phoneNumber: normalized,
-        timeout: const Duration(seconds: 60),
-        verificationCompleted: (PhoneAuthCredential credential) async {
-          try {
-            await FirebaseAuth.instance.signInWithCredential(credential);
-            await store.connectCloud(store.groupCode);
-            if (mounted) {
-              setState(() { loading = false; message = 'Phone login successful.'; });
-            }
-          } catch (e) {
-            if (mounted) setState(() { loading = false; message = 'Auto verification failed: $e'; });
-          }
-        },
-        verificationFailed: (FirebaseAuthException e) {
-          if (mounted) setState(() { loading = false; message = e.message ?? 'OTP failed. Check Firebase Phone provider and SHA-1/SHA-256.'; });
-        },
-        codeSent: (String id, int? resendToken) {
-          if (mounted) setState(() { loading = false; codeSent = true; verificationId = id; message = 'OTP sent to $normalized'; });
-        },
-        codeAutoRetrievalTimeout: (String id) {
-          verificationId = id;
-        },
-      );
-    } catch (e) {
-      if (mounted) setState(() { loading = false; message = 'OTP send failed: $e'; });
-    }
-  }
-
-  Future<void> _verifyOtp() async {
-    if (verificationId.isEmpty || otp.text.trim().length < 4) {
-      setState(() => message = 'Enter OTP first.');
-      return;
-    }
-    setState(() { loading = true; message = 'Verifying OTP...'; });
-    try {
-      final credential = PhoneAuthProvider.credential(verificationId: verificationId, smsCode: otp.text.trim());
-      await FirebaseAuth.instance.signInWithCredential(credential);
-      await store.connectCloud(store.groupCode);
-      if (mounted) setState(() { loading = false; message = 'Phone login successful.'; });
-    } on FirebaseAuthException catch (e) {
-      if (mounted) setState(() { loading = false; message = e.message ?? 'Invalid OTP.'; });
-    } catch (e) {
-      if (mounted) setState(() { loading = false; message = 'Login failed: $e'; });
+  Future<void> _login() async {
+    final code = widget.groupCodeController?.text ?? store.groupCode;
+    final role = widget.adminMode ? 'admin' : 'member';
+    setState(() { loading = true; message = 'Checking PIN...'; });
+    final ok = await store.loginWithPin(code: code, role: role, pin: pin.text);
+    if (mounted) {
+      setState(() {
+        loading = false;
+        message = ok ? store.roleStatus : store.roleStatus;
+      });
     }
   }
 
   Future<void> _logout() async {
-    setState(() { loading = true; message = 'Logging out...'; });
-    await store.logoutPhoneKeepCloud();
-    if (mounted) setState(() { loading = false; codeSent = false; otp.clear(); message = 'Phone logout complete.'; });
+    store.logoutPin();
+    if (mounted) setState(() => message = 'Logged out.');
   }
 
   @override
   Widget build(BuildContext context) {
-    final logged = store.isPhoneLoggedIn;
+    final logged = store.isLoggedIn;
     final isAdmin = store.isAdmin;
+    final isSetupAdmin = widget.adminMode && !store.hasAdminPin;
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 18),
       padding: const EdgeInsets.all(18),
       decoration: cardDeco(),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
-          Icon(logged ? Icons.verified_user_outlined : Icons.phone_android_outlined, color: logged ? paidC : gold2),
+          Icon(isAdmin ? Icons.admin_panel_settings_outlined : Icons.lock_outline, color: isAdmin ? paidC : gold2),
           const SizedBox(width: 10),
-          Expanded(child: Text('Phone Login & Role', style: fr(20))),
+          Expanded(child: Text('Admin / Member PIN Login', style: fr(20))),
         ]),
         const SizedBox(height: 8),
-        Text('Admin phone full access રાખશે. Other phone same Group Codeથી data જોઈ શકશે, પણ edit/delete માટે Admin login જોઈએ.', style: jk(13.5, color: sage)),
+        Text(
+          widget.showIntro
+              ? 'OTP વગર login. Admin PIN full access રાખશે. Member PINથી view-only access મળશે.'
+              : (widget.adminMode
+                  ? 'Admin PIN નાખો. જો આ Group Codeમાં પહેલીવાર setup છે તો આ PIN Admin PIN તરીકે save થશે.'
+                  : 'Member PIN નાખો. Member data જોઈ શકશે, પણ edit/delete કરી શકશે નહીં.'),
+          style: jk(13.5, color: sage),
+        ),
         const SizedBox(height: 12),
         Container(
           padding: const EdgeInsets.all(12),
@@ -2339,39 +2893,107 @@ class _PhoneLoginCardState extends State<PhoneLoginCard> {
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text('Current role: ${store.roleLabel}', style: jk(13.5, w: FontWeight.w700, color: isAdmin ? paidC : gold2)),
             const SizedBox(height: 4),
-            Text(logged ? 'Logged phone: ${store.currentPhone}' : 'Phone login not done', style: jk(12.5, color: sage)),
-            if (store.adminPhone.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Text('Admin phone: ${store.adminPhone}', style: jk(12.5, color: sage)),
-            ],
+            Text('Group Code: ${store.groupCode}', style: jk(12.5, color: sage)),
             const SizedBox(height: 4),
             Text(store.roleStatus, style: jk(12.5, color: isAdmin ? paidC : sage)),
           ]),
         ),
         const SizedBox(height: 12),
-        fieldLabel('Mobile number'),
-        TextField(controller: phone, keyboardType: TextInputType.phone, style: jk(16), decoration: fieldDeco('+919999999999')),
-        const SizedBox(height: 10),
-        if (codeSent) ...[
-          fieldLabel('OTP'),
-          TextField(controller: otp, keyboardType: TextInputType.number, style: jk(16), decoration: fieldDeco('6 digit OTP')),
+        if (!logged || (widget.showIntro && !isAdmin)) ...[
+          fieldLabel(widget.adminMode ? 'Admin PIN' : 'Member PIN'),
+          TextField(
+            controller: pin,
+            keyboardType: TextInputType.number,
+            obscureText: obscure,
+            style: jk(16),
+            decoration: fieldDeco(widget.adminMode ? 'Enter Admin PIN' : 'Enter Member PIN').copyWith(
+              suffixIcon: IconButton(
+                icon: Icon(obscure ? Icons.visibility_off_outlined : Icons.visibility_outlined, color: sage),
+                onPressed: () => setState(() => obscure = !obscure),
+              ),
+            ),
+          ),
           const SizedBox(height: 10),
-        ],
-        if (message.isNotEmpty) ...[
-          Text(message, style: jk(12.5, color: message.toLowerCase().contains('failed') || message.toLowerCase().contains('invalid') ? clay : paidC)),
-          const SizedBox(height: 10),
-        ],
-        if (!logged) ...[
-          primaryButton(loading ? 'Please wait...' : (codeSent ? 'Verify OTP & Login' : 'Send OTP'), loading ? null : (codeSent ? _verifyOtp : _sendOtp)),
-          if (codeSent) ...[
+          if (message.isNotEmpty) ...[
+            Text(message, style: jk(12.5, color: message.toLowerCase().contains('wrong') || message.toLowerCase().contains('error') ? clay : paidC)),
             const SizedBox(height: 10),
-            ghostButton('Resend OTP', loading ? () {} : _sendOtp),
           ],
+          primaryButton(
+            loading ? 'Please wait...' : (isSetupAdmin ? 'Set Admin PIN & Login' : (widget.adminMode ? 'Login as Admin' : 'Login as Member')),
+            loading ? null : _login,
+          ),
         ] else ...[
           primaryButton(loading ? 'Please wait...' : 'Refresh Role', loading ? null : () async { await store.refreshRole(); if (mounted) setState(() {}); }),
           const SizedBox(height: 10),
-          dangerButton('Logout phone login', loading ? () {} : _logout),
+          dangerButton('Logout', _logout),
         ],
+      ]),
+    );
+  }
+}
+
+class PinSettingsCard extends StatefulWidget {
+  const PinSettingsCard({super.key});
+  @override
+  State<PinSettingsCard> createState() => _PinSettingsCardState();
+}
+
+class _PinSettingsCardState extends State<PinSettingsCard> {
+  final adminPin = TextEditingController();
+  final memberPin = TextEditingController();
+  bool loading = false;
+  String message = '';
+
+  @override
+  void dispose() {
+    adminPin.dispose();
+    memberPin.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (!requireAdminAccess(context)) return;
+    if (adminPin.text.trim().isEmpty && memberPin.text.trim().isEmpty) {
+      setState(() => message = 'New Admin PIN અથવા Member PIN નાખો.');
+      return;
+    }
+    setState(() { loading = true; message = 'Saving PIN settings...'; });
+    try {
+      await store.updateLoginPins(adminPin: adminPin.text, memberPin: memberPin.text);
+      adminPin.clear();
+      memberPin.clear();
+      if (mounted) setState(() { loading = false; message = 'PIN settings saved.'; });
+    } catch (e) {
+      if (mounted) setState(() { loading = false; message = '$e'; });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 18),
+      padding: const EdgeInsets.all(18),
+      decoration: cardDeco(),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(Icons.password_outlined, color: gold2),
+          const SizedBox(width: 10),
+          Expanded(child: Text('Login PIN Settings', style: fr(20))),
+        ]),
+        const SizedBox(height: 8),
+        Text('Admin અહીંથી Admin PIN change કરી શકે છે અને Member PIN set/change કરી શકે છે. Member PINથી view-only login થશે.', style: jk(13.5, color: sage)),
+        const SizedBox(height: 12),
+        fieldLabel('New Admin PIN (optional)'),
+        TextField(controller: adminPin, keyboardType: TextInputType.number, obscureText: true, style: jk(16), decoration: fieldDeco('Leave blank to keep same')),
+        const SizedBox(height: 10),
+        fieldLabel('New Member PIN'),
+        TextField(controller: memberPin, keyboardType: TextInputType.number, obscureText: true, style: jk(16), decoration: fieldDeco(store.hasMemberPin ? 'Change member PIN' : 'Set member PIN')),
+        const SizedBox(height: 10),
+        if (message.isNotEmpty) ...[
+          Text(message, style: jk(12.5, color: message.toLowerCase().contains('saved') ? paidC : clay)),
+          const SizedBox(height: 10),
+        ],
+        primaryButton(loading ? 'Saving...' : 'Save Login PINs', loading ? null : _save),
       ]),
     );
   }
@@ -2422,7 +3044,7 @@ class _SettingsPageState extends State<SettingsPage> {
           Text(store.cloudStatus, style: jk(12.5, color: store.cloudReady ? paidC : clay)),
           const SizedBox(height: 14),
           primaryButton(store.cloudSaving ? 'Syncing...' : 'Connect / Switch Group', store.cloudSaving ? null : () async {
-            await store.connectCloud(groupCode.text);
+            await store.connectCloud(groupCode.text, claimAdmin: store.isAdmin);
             if (mounted) {
               groupCode.text = store.groupCode;
               ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(store.cloudStatus, style: jk(14, color: ink)), backgroundColor: store.cloudReady ? gold2 : clay, behavior: SnackBarBehavior.floating));
@@ -2432,7 +3054,9 @@ class _SettingsPageState extends State<SettingsPage> {
         ]),
       ),
       const SizedBox(height: 14),
-      const PhoneLoginCard(),
+      const PinLoginCard(),
+      const SizedBox(height: 14),
+      const PinSettingsCard(),
       const SizedBox(height: 14),
       Container(
         margin: const EdgeInsets.symmetric(horizontal: 18),
@@ -2445,14 +3069,9 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 14),
           ghostButton('Open VC [Year] Report', () => openSheet(context, 'VC Year Report', const YearlyReportPage())),
           const SizedBox(height: 10),
-          ghostButton('Share VC report PDF on WhatsApp', () async {
+          ghostButton('Share VC table PDF on WhatsApp', () async {
             final y = DateTime.now().year;
-            await sharePdfOnWhatsApp(
-              context,
-              title: 'VC [$y] Report',
-              body: buildVcYearShareText(y),
-              filePrefix: 'VC_${y}_Report',
-            );
+            await shareVcXlsxPdfOnWhatsApp(context, y);
           }),
         ]),
       ),
@@ -2512,15 +3131,10 @@ class _SettingsPageState extends State<SettingsPage> {
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text('Data', style: fr(20)),
           const SizedBox(height: 8),
-          Text('Everything is stored privately on this device. Reset restores the sample group; Clear empties it completely.', style: jk(13.5, color: sage)),
+          Text('Data Firebase cloudમાં sync થાય છે. Reset sample group restore કરશે; Clear બધું data empty કરશે.', style: jk(13.5, color: sage)),
           const SizedBox(height: 14),
-          ghostButton('Share all data PDF on WhatsApp', () async {
-            await sharePdfOnWhatsApp(
-              context,
-              title: 'Full Group Loan Report',
-              body: buildFullShareText(),
-              filePrefix: 'Full_Group_Loan_Report',
-            );
+          ghostButton('Share all data table PDF on WhatsApp', () async {
+            await shareFullXlsxPdfOnWhatsApp(context);
           }),
           const SizedBox(height: 10),
           ghostButton('Reset to sample data', () async {
